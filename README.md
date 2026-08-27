@@ -39,19 +39,28 @@ skipped with a warning rather than causing the whole run to fail.
 ## CLI
 
 ```
-sycamorefmt [OPTIONS] [FILES...]
+Usage: sycamorefmt [OPTIONS] [FILES]...
 
-  With no FILES, reads a single Rust source file from stdin and writes the
-  formatted result to stdout. With one or more FILES, formats each file in
-  place (unless --check is given).
+Arguments:
+  [FILES]...  Files to format. With no files, read one Rust source file from
+              stdin and write to stdout.
 
-OPTIONS:
-    --check               Don't write any files; exit with a non-zero status
+Options:
+      --check              Don't write any files; exit with a non-zero status
                            if any input would be reformatted.
-    --edition <EDITION>    Rust edition to format for (default: 2021).
-    --max-width <WIDTH>    Maximum line width (default: 100).
-    -h, --help             Print this help message.
+      --edition <EDITION>  Rust edition to format for [default: 2021]
+                           [possible values: 2015, 2018, 2021, 2024]
+      --max-width <MAX_WIDTH>
+                           Maximum line width [default: 100; must be greater
+                           than zero]
+  -h, --help               Print help
+  -V, --version            Print version
 ```
+
+The command uses Rust's standard exit status conventions: `0` on success,
+`1` with `--check` when input would be reformatted, and `2` for invalid
+arguments or an I/O/formatting error. `--edition` accepts only `2015`, `2018`,
+`2021`, or `2024`; `--max-width` must be greater than zero.
 
 ## Layout
 
