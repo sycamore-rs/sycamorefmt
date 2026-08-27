@@ -117,7 +117,7 @@ fn splice_one(
     }
 
     let raw_body = &src[open_end..close_start];
-    if raw_body.contains("//") || raw_body.contains("/*") {
+    if contains_comments(raw_body) {
         return Err(format!(
             "skipping a `{macro_name}!` macro: its body appears to contain comments, which \
              sycamorefmt does not support preserving yet"
@@ -158,6 +158,64 @@ fn splice_one(
     Ok(Some((path_end, close_end, replacement)))
 }
 
+/// Detects comments without mistaking `//` or `/*` inside string literals for
+/// comments. The parser discards ordinary comments, so formatting those
+/// bodies would lose user text; string-aware detection lets URL-valued props
+/// and text nodes still be formatted safely.
+fn contains_comments(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' || bytes[i + 1] == b'*' {
+                return true;
+            }
+        }
+
+        // Skip ordinary quoted strings, including escaped quotes.
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        // Skip raw strings (r#"..."#, r##"..."##, ...).
+        if bytes[i] == b'r' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] == b'#' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'"' {
+                let hashes = j - i - 1;
+                let mut k = j + 1;
+                while k < bytes.len() {
+                    if bytes[k] == b'"' && bytes[k + 1..].starts_with(&vec![b'#'; hashes]) {
+                        i = k + 1 + hashes;
+                        break;
+                    }
+                    k += 1;
+                }
+                if k >= bytes.len() {
+                    i = bytes.len();
+                }
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+    false
+}
+
 /// Returns the number of leading space characters on the line containing
 /// byte offset `pos` in `src`.
 fn line_indent(src: &str, pos: usize) -> usize {
@@ -166,4 +224,17 @@ fn line_indent(src: &str, pos: usize) -> usize {
         .chars()
         .take_while(|c| *c == ' ')
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_comments;
+
+    #[test]
+    fn comment_detection_ignores_string_contents() {
+        assert!(!contains_comments(r#"div { "https://example.test/a/*b" }"#));
+        assert!(!contains_comments(r##"div { r#"// not a comment"# }"##));
+        assert!(contains_comments("div { /* keep me */ }"));
+        assert!(contains_comments("div { // keep me\n \"text\" }"));
+    }
 }
