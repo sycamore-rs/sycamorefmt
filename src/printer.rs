@@ -127,12 +127,8 @@ fn print_tag(tag: &TagNode, indent: usize, cfg: &Config) -> Result<String, FmtEr
         // width (there is no separator token between children to make the
         // boundary visually obvious), so we only ever attempt an inline
         // combination of multiple children when none of them are tags.
-        let multiple_tag_children = tag.children.0.len() > 1
-            && tag
-                .children
-                .0
-                .iter()
-                .any(|n| matches!(n, Node::Tag(_)));
+        let multiple_tag_children =
+            tag.children.0.len() > 1 && tag.children.0.iter().any(|n| matches!(n, Node::Tag(_)));
         let inline_candidate = if all_single_line && !multiple_tag_children {
             let joined = rendered_children
                 .iter()

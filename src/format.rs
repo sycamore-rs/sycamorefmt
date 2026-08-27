@@ -161,5 +161,8 @@ fn splice_one(
 /// byte offset `pos` in `src`.
 fn line_indent(src: &str, pos: usize) -> usize {
     let line_start = src[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    src[line_start..pos].chars().take_while(|c| *c == ' ').count()
+    src[line_start..pos]
+        .chars()
+        .take_while(|c| *c == ' ')
+        .count()
 }

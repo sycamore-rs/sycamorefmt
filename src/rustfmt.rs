@@ -23,7 +23,10 @@ impl std::fmt::Display for RustfmtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RustfmtError::NotFound(e) => {
-                write!(f, "could not run `rustfmt` (is it installed and on PATH?): {e}")
+                write!(
+                    f,
+                    "could not run `rustfmt` (is it installed and on PATH?): {e}"
+                )
             }
             RustfmtError::Failed { stderr } => {
                 write!(f, "rustfmt failed:\n{stderr}")
@@ -71,8 +74,6 @@ pub fn run(input: &str, cfg: &Config) -> Result<String, RustfmtError> {
         return Err(RustfmtError::Failed { stderr });
     }
 
-    String::from_utf8(output.stdout).map_err(|e| RustfmtError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        e,
-    )))
+    String::from_utf8(output.stdout)
+        .map_err(|e| RustfmtError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
 }
