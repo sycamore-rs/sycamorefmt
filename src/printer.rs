@@ -173,7 +173,7 @@ fn render_props_broken(rendered_props: &[String], inner_pad: &str, pad: &str) ->
 /// column immediately after the end of `s`.
 fn absolute_column_after(indent: usize, s: &str) -> usize {
     match s.rfind('\n') {
-        Some(pos) => s[pos + 1..].chars().count(),
+        Some(pos) => indent + s[pos + 1..].chars().count(),
         None => indent + s.chars().count(),
     }
 }

@@ -4,6 +4,7 @@
 //! with `sycamore-view-parser`, pretty-print it, and splice the result back
 //! in place of the original tokens.
 
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::MacroDelimiter;
 
