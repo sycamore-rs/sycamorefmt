@@ -14,6 +14,8 @@ name = "sycamorefmt"
 path = "src/lib.rs"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
 # Local path dependency on the Sycamore view! macro parser, so that we parse
 # exactly the same grammar that `sycamore-macro` uses at compile time.
 sycamore-view-parser = { path = "../sycamore/packages/sycamore-view-parser" }
