@@ -85,11 +85,10 @@ OPTIONS:
 
 ## Verification status
 
-This was developed and reviewed in a sandbox without a working `cargo`/
-`rustfmt` toolchain or network access to crates.io, so it could not be
-compiled or test-run here. All API usage (`syn`, `proc-macro2`, the local
-`sycamore-view-parser` crate, and the `rustfmt` CLI) was cross-checked
-against current documentation/source, and the fixture expectations in
-`tests/fixtures/` were derived by manually tracing the implementation
-line-by-line. Running `cargo fmt --check`, `cargo build`, and `cargo test` in
-an environment with a real toolchain is the recommended next step.
+The sources pass `cargo fmt --check`. Full compilation and tests could not be
+run in this sandbox because the required crates are not cached and access to
+crates.io is blocked (the installed `cargo` therefore fails while downloading
+`syn`). All API usage (`syn`, `proc-macro2`, the local
+`sycamore-view-parser` crate, and the `rustfmt` CLI) was cross-checked against
+current documentation/source. Run `cargo build` and `cargo test` in an
+environment with crates.io access before publishing.
