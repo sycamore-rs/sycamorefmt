@@ -207,13 +207,30 @@ fn skip_whitespace(source: &str, mut cursor: usize, limit: usize) -> usize {
 }
 
 fn find_next_tag_delimiter(source: &str, start: usize, limit: usize) -> Option<(usize, u8)> {
-    source.as_bytes()[start..limit]
-        .iter()
-        .enumerate()
-        .find_map(|(offset, byte)| match byte {
-            b'(' | b'{' => Some((start + offset, *byte)),
-            _ => None,
-        })
+    let bytes = source.as_bytes();
+    let mut cursor = start;
+    let mut generic_depth = 0usize;
+    while cursor < limit {
+        match bytes[cursor] {
+            b'<' => generic_depth += 1,
+            b'>' if generic_depth > 0 => generic_depth -= 1,
+            b'(' | b'{' if generic_depth == 0 => return Some((cursor, bytes[cursor])),
+            b'(' | b'{' | b'[' => {
+                // Function types and const expressions inside generic
+                // arguments may contain delimiters of their own. Skip those
+                // balanced groups instead of mistaking them for props or
+                // children of the tag.
+                let close = matching_delimiter(source, cursor)?;
+                if close >= limit {
+                    return None;
+                }
+                cursor = close;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn next_non_whitespace(source: &str, start: usize, limit: usize) -> Option<usize> {
