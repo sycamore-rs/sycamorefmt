@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2024"
 description = "A code formatter for Sycamore's `view! { ... }` macro syntax, built on top of rustfmt."
 license = "MIT"
+repository = "https://github.com/sycamore-rs/sycamore"
+keywords = ["sycamore", "formatter", "rustfmt", "view-macro"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "sycamorefmt"
