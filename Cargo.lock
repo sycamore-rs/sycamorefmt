@@ -143,6 +143,8 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "sycamore-view-parser"
 version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a0ddef2ecbaa20b71dd6194dbafbfa0dc5925de2d99772381316519368e8653"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -151,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "sycamorefmt"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "proc-macro2",
