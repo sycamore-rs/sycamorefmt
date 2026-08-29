@@ -369,6 +369,12 @@ mod tests {
     }
 
     #[test]
+    fn ignores_edges_and_single_newlines() {
+        let result = spacing("\n\nfirst {}\nsecond {}\n\n");
+        assert!(!result.has_blank_line_between(0));
+    }
+
+    #[test]
     fn matches_nested_delimiters_in_props_and_children() {
         let result = spacing("div(value = { let _ = r#\"}\"#; value }) {\n\nspan {}\n\ntext {}\n}");
         assert!(result.node(0).children.has_blank_line_between(0));
