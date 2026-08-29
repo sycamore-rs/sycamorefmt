@@ -3,6 +3,13 @@
 A code formatter for [Sycamore](https://github.com/sycamore-rs/sycamore)'s
 `view! { ... }` macro syntax, built on top of `rustfmt`.
 
+## Usage
+
+```sh
+cargo install sycamorefmt
+sycamorefmt [FILES]
+```
+
 ## How it works
 
 1. The whole input file is first run through the real `rustfmt` binary. This
@@ -14,11 +21,9 @@ A code formatter for [Sycamore](https://github.com/sycamore-rs/sycamore)'s
 2. `sycamorefmt` then walks the resulting syntax tree (via `syn::visit::Visit`)
    to find every macro invocation whose path ends in `view` (matching both
    `view!{...}` and qualified paths like `sycamore::view!{...}`).
-3. Each invocation's token stream is parsed using the project's own
-   [`sycamore-view-parser`](../sycamore/packages/sycamore-view-parser) crate
-   (referenced as a local path dependency), producing the same
-   `ir::Root`/`Node`/`Prop`/... tree that `sycamore-macro` itself uses for
-   code generation.
+3. Each invocation's token stream is parsed using the `sycamore-view-parser`
+   crate, producing the same `ir::Root`/`Node`/`Prop`/... tree that
+   `sycamore-macro` itself uses for code generation.
 4. That tree is pretty-printed with a small width-aware printer, and the
    result is spliced back into the file in place of the original tokens,
    using exact byte offsets (`proc_macro2::Span::byte_range()`) so nothing
@@ -36,49 +41,7 @@ appears to contain a comment (comments are not currently preserved through
 the pretty-printer, so we conservatively leave such bodies untouched) is
 skipped with a warning rather than causing the whole run to fail.
 
-## CLI
-
-```
-Usage: sycamorefmt [OPTIONS] [FILES]...
-
-Arguments:
-  [FILES]...  Files to format. With no files, read one Rust source file from
-              stdin and write to stdout.
-
-Options:
-      --check              Don't write any files; exit with a non-zero status
-                           if any input would be reformatted.
-      --edition <EDITION>  Rust edition to format for [default: 2021]
-                           [possible values: 2015, 2018, 2021, 2024]
-      --max-width <MAX_WIDTH>
-                           Maximum line width [default: 100; must be greater
-                           than zero]
-  -h, --help               Print help
-  -V, --version            Print version
-```
-
-The command uses Rust's standard exit status conventions: `0` on success,
-`1` with `--check` when input would be reformatted, and `2` for invalid
-arguments or an I/O/formatting error. `--edition` accepts only `2015`, `2018`,
-`2021`, or `2024`; `--max-width` must be greater than zero.
-
-## Layout
-
-- `src/config.rs` -- shared `Config` (max width, edition, tab size).
-- `src/rustfmt.rs` -- invokes the system `rustfmt` binary as a subprocess.
-- `src/finder.rs` -- `syn::visit::Visit` pass that locates `view!` macros.
-- `src/printer.rs` -- pretty-prints `sycamore_view_parser::ir` trees.
-- `src/exprfmt.rs` -- formats embedded Rust expressions (and recurses into
-  nested `view!` macros within them).
-- `src/format.rs` -- ties the above together into `format_source`.
-- `src/main.rs` -- CLI.
-- `tests/fixtures/*.input.rs` / `*.expected.rs` -- hand-verified before/after
-  pairs used by `tests/format_fixtures.rs`, plus a set of "robustness" cases
-  (spread props, directives, hyphenated custom elements, nested `view!`,
-  qualified macro paths, ...) that are checked for idempotency and
-  re-parseability rather than exact output.
-
-## Known limitations (MVP)
+## Known limitations
 
 - Comments inside a `view! { ... }` body are not preserved; such bodies are
   detected heuristically (presence of `//` or `/*`) and left untouched
@@ -91,13 +54,3 @@ arguments or an I/O/formatting error. `--edition` accepts only `2015`, `2018`,
   line-breaking decisions are made relative to that wrapper's column, not
   the expression's final column. Output is always valid, just occasionally
   not perfectly width-optimal at deep nesting levels.
-
-## Verification status
-
-The sources pass `cargo fmt --check`. Full compilation and tests could not be
-run in this sandbox because the required crates are not cached and access to
-crates.io is blocked (the installed `cargo` therefore fails while downloading
-`syn`). All API usage (`syn`, `proc-macro2`, the local
-`sycamore-view-parser` crate, and the `rustfmt` CLI) was cross-checked against
-current documentation/source. Run `cargo build` and `cargo test` in an
-environment with crates.io access before publishing.
