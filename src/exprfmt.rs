@@ -81,19 +81,17 @@ fn extract_fn_body(formatted: &str) -> Option<String> {
 /// (barring a bug elsewhere) to be exactly the pair we added.
 fn strip_wrapping_parens(body: &str) -> String {
     let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
-    if let Some(first) = lines.first_mut() {
-        if let Some(pos) = first.find('(') {
-            if first[..pos].trim().is_empty() {
-                first.remove(pos);
-            }
-        }
+    if let Some(first) = lines.first_mut()
+        && let Some(pos) = first.find('(')
+        && first[..pos].trim().is_empty()
+    {
+        first.remove(pos);
     }
-    if let Some(last) = lines.last_mut() {
-        if let Some(pos) = last.rfind(')') {
-            if last[pos + 1..].trim().is_empty() {
-                last.remove(pos);
-            }
-        }
+    if let Some(last) = lines.last_mut()
+        && let Some(pos) = last.rfind(')')
+        && last[pos + 1..].trim().is_empty()
+    {
+        last.remove(pos);
     }
     lines.join("\n")
 }

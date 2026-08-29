@@ -166,10 +166,9 @@ fn contains_comments(src: &str) -> bool {
     let bytes = src.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'/' || bytes[i + 1] == b'*' {
-                return true;
-            }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*')
+        {
+            return true;
         }
 
         // Skip ordinary quoted strings, including escaped quotes.
