@@ -146,7 +146,7 @@ fn splice_one(
     let body_indent = indent + cfg.tab_spaces;
     let pad = " ".repeat(indent);
 
-    let spacing = crate::trivia::SpacingRoot::from_root(&root, src);
+    let spacing = crate::trivia::SpacingRoot::from_root(&root, raw_body);
     let replacement = if root.0.is_empty() {
         "! {}".to_string()
     } else {
