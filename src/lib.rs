@@ -13,6 +13,7 @@ mod finder;
 mod format;
 mod printer;
 mod rustfmt;
+mod trivia;
 
 pub use config::Config;
 pub use error::FmtError;

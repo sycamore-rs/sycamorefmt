@@ -27,11 +27,7 @@ pub(crate) struct SpacingNode {
 
 impl SpacingRoot {
     pub(crate) fn from_root(root: &Root, source: &str) -> Self {
-        let ranges: Vec<_> = root
-            .0
-            .iter()
-            .map(|node| node_range(node, source))
-            .collect();
+        let ranges: Vec<_> = root.0.iter().map(|node| node_range(node, source)).collect();
         let between = ranges
             .windows(2)
             .map(|pair| match (&pair[0], &pair[1]) {
@@ -87,7 +83,10 @@ impl SpacingRoot {
 /// two newline sequences with only horizontal whitespace between them are.
 fn contains_empty_line(gap: &str) -> bool {
     let lines: Vec<_> = gap.split('\n').collect();
-    lines.len() >= 3 && lines[1..lines.len() - 1].iter().any(|line| line.trim().is_empty())
+    lines.len() >= 3
+        && lines[1..lines.len() - 1]
+            .iter()
+            .any(|line| line.trim().is_empty())
 }
 
 /// Computes a node's source range.  The parser does not expose delimiter
@@ -97,7 +96,7 @@ fn contains_empty_line(gap: &str) -> bool {
 /// IR; they are intentionally returned as spanless here.
 fn node_range(node: &Node, source: &str) -> Option<Range<usize>> {
     match node {
-        Node::Text(text) => span_range(text),
+        Node::Text(text) => valid_range(text.value.span().byte_range()),
         Node::Dyn(dynamic) => dyn_range(dynamic, source),
         Node::Tag(tag) => tag_range(tag, source),
     }
@@ -153,9 +152,13 @@ fn dyn_range(dynamic: &DynNode, source: &str) -> Option<Range<usize>> {
     if open != b'(' {
         return None;
     }
-    let open_pos = source[..value.start]
-        .len()
-        .checked_sub(1 + source[..value.start].bytes().rev().take_while(|b| b.is_ascii_whitespace()).count())?;
+    let open_pos = source[..value.start].len().checked_sub(
+        1 + source[..value.start]
+            .bytes()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count(),
+    )?;
     Some(open_pos..matching_delimiter(source, open_pos)? + 1)
 }
 

@@ -146,10 +146,11 @@ fn splice_one(
     let body_indent = indent + cfg.tab_spaces;
     let pad = " ".repeat(indent);
 
+    let spacing = crate::trivia::SpacingRoot::from_root(&root, src);
     let replacement = if root.0.is_empty() {
         "! {}".to_string()
     } else {
-        let body = printer::print_root(&root, body_indent, cfg)
+        let body = printer::print_root(&root, &spacing, body_indent, cfg)
             .map_err(|e| format!("skipping a `{macro_name}!` macro: {e}"))?;
         format!("! {{\n{body}\n{pad}}}")
     };

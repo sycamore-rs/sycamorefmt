@@ -16,25 +16,43 @@ use sycamore_view_parser::ir::{DynNode, Node, Prop, PropType, Root, TagIdent, Ta
 use crate::config::Config;
 use crate::error::FmtError;
 use crate::exprfmt::format_expr;
+use crate::trivia::{SpacingNode, SpacingRoot};
 
 /// Renders every node in `root`, one per line, with every line (including
 /// the first) indented by `indent` spaces. Returns an empty string if `root`
 /// has no nodes. Does not add a trailing newline.
-pub fn print_root(root: &Root, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+pub fn print_root(
+    root: &Root,
+    spacing: &SpacingRoot,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
     let pad = " ".repeat(indent);
-    let mut lines = Vec::with_capacity(root.0.len());
-    for node in &root.0 {
-        let rendered = print_node(node, indent, cfg)?;
-        lines.push(format!("{pad}{rendered}"));
+    let mut output = String::new();
+    for (index, node) in root.0.iter().enumerate() {
+        if index > 0 {
+            output.push_str(if spacing.has_blank_line_between(index - 1) {
+                "\n\n"
+            } else {
+                "\n"
+            });
+        }
+        let rendered = print_node(node, spacing.node(index), indent, cfg)?;
+        output.push_str(&format!("{pad}{rendered}"));
     }
-    Ok(lines.join("\n"))
+    Ok(output)
 }
 
 /// Renders a single node. See the module docs for the indentation
 /// convention used for the returned string.
-fn print_node(node: &Node, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+fn print_node(
+    node: &Node,
+    spacing: &SpacingNode,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
     match node {
-        Node::Tag(tag) => print_tag(tag, indent, cfg),
+        Node::Tag(tag) => print_tag(tag, &spacing.children, indent, cfg),
         Node::Text(text) => Ok(print_text(text)),
         Node::Dyn(d) => print_dyn(d, indent, cfg),
     }
@@ -66,13 +84,23 @@ impl Rendered {
     }
 }
 
-fn render(node: &Node, indent: usize, cfg: &Config) -> Result<Rendered, FmtError> {
+fn render(
+    node: &Node,
+    spacing: &SpacingNode,
+    indent: usize,
+    cfg: &Config,
+) -> Result<Rendered, FmtError> {
     Ok(Rendered {
-        text: print_node(node, indent, cfg)?,
+        text: print_node(node, spacing, indent, cfg)?,
     })
 }
 
-fn print_tag(tag: &TagNode, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+fn print_tag(
+    tag: &TagNode,
+    spacing: &SpacingRoot,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
     let head = tag_ident_str(&tag.ident);
     let inner_indent = indent + cfg.tab_spaces;
     let pad = " ".repeat(indent);
@@ -119,7 +147,8 @@ fn print_tag(tag: &TagNode, indent: usize, cfg: &Config) -> Result<String, FmtEr
             .children
             .0
             .iter()
-            .map(|n| render(n, inner_indent, cfg))
+            .enumerate()
+            .map(|(index, n)| render(n, spacing.node(index), inner_indent, cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let all_single_line = rendered_children.iter().all(Rendered::is_single_line);
         // Stacking more than one element/component child onto a shared
@@ -129,28 +158,29 @@ fn print_tag(tag: &TagNode, indent: usize, cfg: &Config) -> Result<String, FmtEr
         // combination of multiple children when none of them are tags.
         let multiple_tag_children =
             tag.children.0.len() > 1 && tag.children.0.iter().any(|n| matches!(n, Node::Tag(_)));
-        let inline_candidate = if all_single_line && !multiple_tag_children {
-            let joined = rendered_children
-                .iter()
-                .map(|r| r.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let candidate = format!(" {{ {joined} }}");
-            let current_col = absolute_column_after(indent, &format!("{head}{props_part}"));
-            let full_width_used = current_col + candidate.chars().count();
-            if full_width_used <= cfg.max_width && !joined.is_empty() {
-                Some(candidate)
+        let inline_candidate =
+            if all_single_line && !multiple_tag_children && !spacing.has_blank_line() {
+                let joined = rendered_children
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let candidate = format!(" {{ {joined} }}");
+                let current_col = absolute_column_after(indent, &format!("{head}{props_part}"));
+                let full_width_used = current_col + candidate.chars().count();
+                if full_width_used <= cfg.max_width && !joined.is_empty() {
+                    Some(candidate)
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         match inline_candidate {
             Some(c) => c,
             None => {
-                let block = print_root(&tag.children, inner_indent, cfg)?;
+                let block = print_root(&tag.children, spacing, inner_indent, cfg)?;
                 format!(" {{\n{block}\n{pad}}}")
             }
         }
