@@ -21,7 +21,7 @@ struct Cli {
     check: bool,
 
     /// Rust edition to format for.
-    #[arg(long, default_value = "2021", value_parser = parse_edition)]
+    #[arg(long, default_value = "2024", value_parser = parse_edition)]
     edition: String,
 
     /// Maximum line width.
