@@ -194,6 +194,10 @@ fn matching_delimiter(source: &str, open: usize) -> Option<usize> {
     let mut stack = vec![expected];
     let mut i = open + 1;
     while i < bytes.len() {
+        if let Some(end) = raw_string_end(bytes, i) {
+            i = end;
+            continue;
+        }
         if bytes[i] == b'"' {
             i = skip_quoted(bytes, i);
             continue;
@@ -240,6 +244,28 @@ fn matching_delimiter(source: &str, open: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+fn raw_string_end(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes.get(i) != Some(&b'r') {
+        return None;
+    }
+    let mut quote = i + 1;
+    while quote < bytes.len() && bytes[quote] == b'#' {
+        quote += 1;
+    }
+    if bytes.get(quote) != Some(&b'"') {
+        return None;
+    }
+    let hashes = quote - i - 1;
+    let mut cursor = quote + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' && bytes[cursor + 1..].starts_with(&vec![b'#'; hashes]) {
+            return Some(cursor + 1 + hashes);
+        }
+        cursor += 1;
+    }
+    Some(bytes.len())
 }
 
 fn skip_quoted(bytes: &[u8], mut i: usize) -> usize {
