@@ -10,8 +10,8 @@
 //! [`crate::exprfmt`], which re-runs the whole pipeline over the
 //! re-serialized tokens of any expression that contains them.
 
-use syn::visit::{self, Visit};
 use syn::Macro;
+use syn::visit::{self, Visit};
 
 /// A `view!`-like macro invocation found while walking a `syn::File`.
 #[derive(Debug, Clone)]

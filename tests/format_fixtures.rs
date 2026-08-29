@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use sycamorefmt::{format_source, Config};
+use sycamorefmt::{Config, format_source};
 
 /// Returns `true` if a real `rustfmt` binary appears to be usable.
 fn rustfmt_available() -> bool {

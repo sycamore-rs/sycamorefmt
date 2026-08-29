@@ -16,4 +16,4 @@ mod rustfmt;
 
 pub use config::Config;
 pub use error::FmtError;
-pub use format::{format_source, FormatOutcome};
+pub use format::{FormatOutcome, format_source};

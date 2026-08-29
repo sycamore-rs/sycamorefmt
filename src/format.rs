@@ -4,8 +4,8 @@
 //! with `sycamore-view-parser`, pretty-print it, and splice the result back
 //! in place of the original tokens.
 
-use syn::visit::Visit;
 use syn::MacroDelimiter;
+use syn::visit::Visit;
 
 use crate::config::Config;
 use crate::error::FmtError;

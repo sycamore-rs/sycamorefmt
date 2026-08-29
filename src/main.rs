@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use sycamorefmt::{format_source, Config};
+use sycamorefmt::{Config, format_source};
 
 /// Format Sycamore's `view! { ... }` macro syntax.
 #[derive(Debug, Parser)]
