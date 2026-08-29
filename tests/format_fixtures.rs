@@ -97,6 +97,18 @@ fn long_prop_list_is_broken_across_lines() {
     run_fixture("props_break.input.rs", "props_break.expected.rs");
 }
 
+#[test]
+fn whitespace_is_preserved() {
+    skip_without_rustfmt!();
+    run_fixture("whitespace.input.rs", "whitespace.expected.rs");
+}
+
+#[test]
+fn blank_line_trivia_is_preserved_and_normalized() {
+    skip_without_rustfmt!();
+    run_fixture("trivia.input.rs", "trivia.expected.rs");
+}
+
 /// A grab-bag of trickier inputs that we don't hand-verify byte-for-byte,
 /// but which should always: format without error, be idempotent, and
 /// produce output whose `view!` bodies still parse successfully.
