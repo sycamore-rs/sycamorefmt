@@ -102,10 +102,6 @@ fn node_range(node: &Node, source: &str) -> Option<Range<usize>> {
     }
 }
 
-fn span_range<T: Spanned>(node: &T) -> Option<Range<usize>> {
-    valid_range(node.span().byte_range())
-}
-
 fn valid_range(range: Range<usize>) -> Option<Range<usize>> {
     if range.start < range.end {
         Some(range)
@@ -126,11 +122,15 @@ fn tag_range(tag: &TagNode, source: &str) -> Option<Range<usize>> {
     let close = match find_next_tag_delimiter(source, start)? {
         (open, b'(') => {
             let prop_close = matching_delimiter(source, open)?;
-            if tag.children.0.is_empty() {
-                prop_close
-            } else {
-                let child_open = find_specific_open(source, prop_close + 1, b'{')?;
-                matching_delimiter(source, child_open)?
+            // The IR cannot distinguish `tag(props)` from
+            // `tag(props) {}` when the child root is empty.  Look for the
+            // optional child brace directly after the prop list so the
+            // entire node still gets the correct source range.
+            match next_non_whitespace(source, prop_close + 1) {
+                Some(child_open) if source.as_bytes()[child_open] == b'{' => {
+                    matching_delimiter(source, child_open)?
+                }
+                _ => prop_close,
             }
         }
         (open, b'{') => matching_delimiter(source, open)?,
@@ -172,10 +172,10 @@ fn find_next_tag_delimiter(source: &str, start: usize) -> Option<(usize, u8)> {
         })
 }
 
-fn find_specific_open(source: &str, start: usize, wanted: u8) -> Option<usize> {
+fn next_non_whitespace(source: &str, start: usize) -> Option<usize> {
     source.as_bytes()[start..]
         .iter()
-        .position(|byte| *byte == wanted)
+        .position(|byte| !byte.is_ascii_whitespace())
         .map(|offset| start + offset)
 }
 
