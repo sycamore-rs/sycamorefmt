@@ -1,6 +1,6 @@
 [package]
 name = "sycamorefmt"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "A code formatter for Sycamore's `view! { ... }` macro syntax, built on top of rustfmt."
 license = "MIT"
