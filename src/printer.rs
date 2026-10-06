@@ -11,12 +11,14 @@
 //! to know about the others' indentation math.
 
 use quote::quote;
-use sycamore_view_parser::ir::{DynNode, Node, Prop, PropType, Root, TagIdent, TagNode, TextNode};
+use sycamore_view_parser::ir::{
+    DynNode, IfNode, MatchNode, Node, Prop, PropType, Root, TagIdent, TagNode, TextNode,
+};
 
 use crate::config::Config;
 use crate::error::FmtError;
 use crate::exprfmt::format_expr;
-use crate::trivia::{SpacingNode, SpacingRoot};
+use crate::trivia::{ControlSpacing, SpacingNode, SpacingRoot};
 
 /// Renders every node in `root`, one per line, with every line (including
 /// the first) indented by `indent` spaces. Returns an empty string if `root`
@@ -55,6 +57,8 @@ fn print_node(
         Node::Tag(tag) => print_tag(tag, &spacing.children, indent, cfg),
         Node::Text(text) => Ok(print_text(text)),
         Node::Dyn(d) => print_dyn(d, indent, cfg),
+        Node::If(if_node) => print_if(if_node, spacing, indent, cfg),
+        Node::Match(match_node) => print_match(match_node, spacing, indent, cfg),
     }
 }
 
@@ -69,6 +73,138 @@ fn print_text(text: &TextNode) -> String {
 fn print_dyn(d: &DynNode, indent: usize, cfg: &Config) -> Result<String, FmtError> {
     let expr = format_expr(&d.value, indent, cfg)?;
     Ok(format!("({expr})"))
+}
+
+fn print_if(
+    if_node: &IfNode,
+    spacing: &SpacingNode,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
+    let condition = format_expr(&if_node.cond, indent, cfg)?;
+    let then_spacing = match &spacing.control {
+        ControlSpacing::If { then_branch, .. } => then_branch,
+        _ => {
+            return Err(FmtError::Internal(
+                "if node is missing branch trivia".into(),
+            ));
+        }
+    };
+    let then_body = print_block(&if_node.then, then_spacing, indent, cfg)?;
+    let mut output = format!("if {condition}{then_body}");
+
+    if let Some(else_branch) = &if_node.else_branch {
+        let (else_spacing, else_if) = match &spacing.control {
+            ControlSpacing::If {
+                else_branch: Some(else_branch),
+                else_if,
+                ..
+            } => (else_branch, *else_if),
+            _ => {
+                return Err(FmtError::Internal(
+                    "if node is missing else-branch trivia".into(),
+                ));
+            }
+        };
+        if else_if {
+            let [Node::If(nested)] = else_branch.0.as_slice() else {
+                return Err(FmtError::Internal(
+                    "else-if node does not contain exactly one if branch".into(),
+                ));
+            };
+            let nested_spacing = else_spacing.node(0);
+            let rendered = print_if(nested, nested_spacing, indent, cfg)?;
+            output.push_str(" else ");
+            output.push_str(&rendered);
+        } else {
+            let rendered = print_block(else_branch, else_spacing, indent, cfg)?;
+            output.push_str(" else");
+            output.push_str(&rendered);
+        }
+    }
+
+    Ok(output)
+}
+
+fn print_match(
+    match_node: &MatchNode,
+    spacing: &SpacingNode,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
+    let expression = format_expr(&match_node.expr, indent, cfg)?;
+    let arm_spacings = match &spacing.control {
+        ControlSpacing::Match { arms } if arms.len() == match_node.arms.len() => arms,
+        _ => {
+            return Err(FmtError::Internal(
+                "match node is missing arm trivia".into(),
+            ));
+        }
+    };
+    let arm_indent = indent + cfg.tab_spaces;
+    let arm_pad = " ".repeat(arm_indent);
+    let closing_pad = " ".repeat(indent);
+    let mut arms = Vec::with_capacity(match_node.arms.len());
+
+    for (arm, arm_spacing) in match_node.arms.iter().zip(arm_spacings) {
+        let pattern = format_pattern(&arm.pat, arm_indent, cfg)?;
+        let body = print_block(&arm.body, arm_spacing, arm_indent, cfg)?;
+        arms.push(format!("{arm_pad}{pattern} =>{body},"));
+    }
+
+    if arms.is_empty() {
+        Ok(format!("match {expression} {{}}"))
+    } else {
+        Ok(format!(
+            "match {expression} {{\n{}\n{closing_pad}}}",
+            arms.join("\n")
+        ))
+    }
+}
+
+fn format_pattern(pattern: &syn::Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+    let pattern_tokens = quote!(#pattern).to_string();
+    let wrapper = format!(
+        "fn __sycamorefmt_pattern__() {{\n    match __sycamorefmt_value {{\n        {pattern_tokens} => (),\n    }}\n}}\n"
+    );
+    let formatted = crate::rustfmt::run(&wrapper, cfg)?;
+    let arm_start = formatted
+        .find("    match __sycamorefmt_value {\n")
+        .map(|pos| pos + "    match __sycamorefmt_value {\n".len())
+        .ok_or_else(|| FmtError::Internal("could not locate formatted match pattern".into()))?;
+    let arrow = formatted
+        .rfind(" => (),")
+        .filter(|pos| *pos >= arm_start)
+        .ok_or_else(|| FmtError::Internal("could not locate formatted match arm".into()))?;
+    let pattern = &formatted[arm_start..arrow];
+    let base = "        ";
+    let mut lines = pattern.lines();
+    let first = lines
+        .next()
+        .unwrap_or_default()
+        .strip_prefix(base)
+        .unwrap_or_else(|| pattern.trim_start());
+    let mut rendered = first.to_string();
+    for line in lines {
+        rendered.push('\n');
+        rendered.push_str(&" ".repeat(indent));
+        rendered.push_str(line.strip_prefix(base).unwrap_or_else(|| line.trim_start()));
+    }
+    Ok(rendered)
+}
+
+fn print_block(
+    root: &Root,
+    spacing: &SpacingRoot,
+    indent: usize,
+    cfg: &Config,
+) -> Result<String, FmtError> {
+    if root.0.is_empty() {
+        Ok(" {}".to_string())
+    } else {
+        let body = print_root(root, spacing, indent + cfg.tab_spaces, cfg)?;
+        Ok(format!(" {{\n{body}\n{}}}", " ".repeat(indent)))
+    }
 }
 
 /// A node's rendering, along with whether it could be produced without any

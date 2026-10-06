@@ -20,13 +20,13 @@ path = "src/lib.rs"
 clap = { version = "4.6", features = ["derive"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 quote = "1.0.21"
-syn = { version = "2.0", features = [
+syn = { version = "3.0", features = [
 	"extra-traits",
 	"full",
 	"visit",
 	"parsing",
 	"printing",
 ] }
-sycamore-view-parser = "0.9.2"
+sycamore-view-parser = "0.9.4"
 
 [dev-dependencies]

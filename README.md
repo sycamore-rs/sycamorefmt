@@ -21,9 +21,10 @@ sycamorefmt [FILES]
 2. `sycamorefmt` then walks the resulting syntax tree (via `syn::visit::Visit`)
    to find every macro invocation whose path ends in `view` (matching both
    `view!{...}` and qualified paths like `sycamore::view!{...}`).
-3. Each invocation's token stream is parsed using the `sycamore-view-parser`
-   crate, producing the same `ir::Root`/`Node`/`Prop`/... tree that
-   `sycamore-macro` itself uses for code generation.
+3. Each invocation's token stream is parsed using `sycamore-view-parser`
+   0.9.4 or newer, producing the same `ir::Root`/`Node`/`Prop`/... tree that
+   `sycamore-macro` itself uses for code generation. This includes conditional
+   (`if`/`else if`/`else`) and `match` view nodes.
 4. That tree is pretty-printed with a small width-aware printer, and the
    result is spliced back into the file in place of the original tokens,
    using exact byte offsets (`proc_macro2::Span::byte_range()`) so nothing

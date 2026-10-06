@@ -173,7 +173,95 @@ fn f() -> View {
     }
 }
 "#,
+    // Conditional view branches, including else-if and blank lines between
+    // the nested branch's siblings.
+    r#"
+fn f(show: bool, ready: bool) -> View {
+    view! {
+        if show {
+            span { "shown" }
+
+            "more"
+        } else if ready {
+            span { "ready" }
+        } else {
+            "hidden"
+        }
+    }
+}
+"#,
+    // Match branches exercise guarded/destructured patterns, block roots,
+    // and the single-node arm-body grammar.
+    r#"
+fn f(choice: Option<i32>) -> View {
+    view! {
+        match choice {
+            Some(value) if value > 0 => {
+                strong { (value) }
+
+                "positive"
+            }
+            None => "empty",
+            _ => (fallback()),
+        }
+    }
+}
+"#,
 ];
+
+#[test]
+fn if_and_match_nodes_render_structured_branches() {
+    skip_without_rustfmt!();
+    let input = r#"
+fn f(show: bool, ready: bool, choice: Option<i32>) -> View {
+    view! {
+        if show {
+            span { "shown" }
+
+            "more"
+        } else if ready {
+            span { "ready" }
+        } else {
+            "hidden"
+        }
+        match choice {
+            Some(value) if value > 0 => {
+                strong { (value) }
+
+                "positive"
+            }
+            None => "empty",
+            _ => (fallback()),
+        }
+    }
+}
+"#;
+    let cfg = Config::default();
+    let first = format_source(input, &cfg).expect("control-flow nodes should format");
+    assert!(
+        first.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        first.warnings
+    );
+    assert!(first.output.contains("} else if ready {"));
+    assert!(first.output.contains("Some(value) if value > 0 => {"));
+    assert!(
+        first
+            .output
+            .contains("None => {\n                \"empty\"\n            },")
+    );
+    assert!(
+        first
+            .output
+            .contains("span { \"shown\" }\n\n            \"more\"")
+    );
+    assert_view_macros_parse(&first.output, 0);
+
+    let second =
+        format_source(&first.output, &cfg).expect("formatted control flow should reformat");
+    assert!(!second.changed, "control-flow output should be idempotent");
+    assert_eq!(second.output, first.output);
+}
 
 #[test]
 fn robustness_cases_format_without_error_and_are_idempotent() {
