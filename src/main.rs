@@ -24,7 +24,7 @@ struct Cli {
     #[arg(long)]
     fail_on_warnings: bool,
 
-    /// Rust edition to format for.
+    /// Accepted for compatibility; currently has no effect on formatting.
     #[arg(long, default_value = "2024", value_parser = parse_edition)]
     edition: String,
 

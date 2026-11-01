@@ -10,6 +10,9 @@ cargo install sycamorefmt
 sycamorefmt [FILES]
 ```
 
+Requires Rust 1.94 or newer to build, matching the minimum version declared by
+`sycamore-view-parser`.
+
 With no files, sycamorefmt reads a Rust source file from standard input and
 writes the result to standard output. Use `--check` to report files that would
 change without writing them, and `--max-width` to control view layout. Run
@@ -21,8 +24,10 @@ inputs, including when combined with `--check`.
 **Only view macros are formatted.** The surrounding Rust source is left
 unchanged; run `rustfmt` separately if you want to format it too. Neither
 installing nor running sycamorefmt requires a `rustfmt` executable. The
-`--edition` option is retained for compatibility; the `syn` parser and the
-in-process printer do not currently use it to change their behavior.
+`--edition` accepts `2015`, `2018`, `2021`, or `2024` (default `2024`) for
+compatibility, but currently has no effect on formatting. The `syn` parser and
+the in-process printer do not use the selected edition to change their
+behavior.
 
 When formatting files, sycamorefmt writes a temporary file beside the resolved
 source file and replaces it only after the write succeeds. Symlinks are followed

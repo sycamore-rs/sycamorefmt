@@ -63,6 +63,8 @@ fn version_and_help_are_provided_by_clap() {
     assert!(help_text.contains("Usage: sycamorefmt [OPTIONS] [FILES]..."));
     assert!(help_text.contains("--check"));
     assert!(help_text.contains("--edition <EDITION>"));
+    assert!(help_text.contains("Accepted for compatibility"));
+    assert!(help_text.contains("no effect on formatting"));
     assert!(help_text.contains("--max-width <MAX_WIDTH>"));
     assert!(help_text.contains("-V, --version"));
 }
@@ -77,9 +79,16 @@ fn edition_and_max_width_are_validated() {
     assert_eq!(zero_width.status.code(), Some(2));
     assert!(stderr(&zero_width).contains("max width must be greater than zero"));
 
+    let input = b"fn main(){view!{div{\"hello\"}};}\n";
+    let default = run_with_stdin(&[], input);
+    assert!(default.status.success(), "{}", stderr(&default));
     for edition in ["2015", "2018", "2021", "2024"] {
-        let output = run(&["--edition", edition, "--help"]);
+        let output = run_with_stdin(&["--edition", edition], input);
         assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            output.stdout, default.stdout,
+            "edition {edition} changed output"
+        );
     }
 
     let positive_width = run(&["--max-width", "1", "--help"]);

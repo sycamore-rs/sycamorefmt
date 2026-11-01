@@ -132,7 +132,9 @@ fn still_formats_nested_views_in_ordinary_expression_syntax() {
 fn rustc_stdout(source: &str, label: &str) -> String {
     let directory = tempfile::tempdir().expect("failed to create rustc temp directory");
     let source_path = directory.path().join(format!("{label}.rs"));
-    let binary_path = directory.path().join(label);
+    let binary_path = directory
+        .path()
+        .join(format!("{label}{}", std::env::consts::EXE_SUFFIX));
     fs::write(&source_path, source).expect("failed to write rustc input");
 
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());

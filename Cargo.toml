@@ -2,6 +2,7 @@
 name = "sycamorefmt"
 version = "0.0.3"
 edition = "2024"
+rust-version = "1.94"
 description = "A code formatter for Sycamore's `view! { ... }` macro syntax."
 license = "MIT"
 repository = "https://github.com/sycamore-rs/sycamore"
