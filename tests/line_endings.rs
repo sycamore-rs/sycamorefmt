@@ -77,6 +77,14 @@ fn generated_layout_uses_crlf_without_normalizing_literal_bytes() {
 }
 
 #[test]
+fn crlf_line_comments_do_not_bias_newline_detection() {
+    let input = "// a\r\n// b\r\n// c\r\nfn f() {\r\n    view! { div { span {} } }\r\n}\r\n";
+    let output = assert_idempotent(input, &Config::default());
+    assert!(!has_bare_lf(&output), "mixed line endings: {output:?}");
+    assert!(output.contains("view! {\r\n"), "{output:?}");
+}
+
+#[test]
 fn final_layout_conversion_preserves_opaque_macro_token_whitespace() {
     let input =
         "fn f() {\n    view! { div(value={ stringify!(left   +\n            right) }) {} }\n}\n";

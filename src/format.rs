@@ -532,6 +532,14 @@ fn source_newline(src: &str) -> &'static str {
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
+            if i < bytes.len() {
+                if i > 0 && bytes[i - 1] == b'\r' {
+                    crlf += 1;
+                } else {
+                    lf += 1;
+                }
+                i += 1;
+            }
         } else if bytes.get(i..i + 2) == Some(b"/*") {
             let mut depth = 1usize;
             i += 2;
