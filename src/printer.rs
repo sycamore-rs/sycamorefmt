@@ -339,15 +339,32 @@ fn print_prop(prop: &Prop, indent: usize, cfg: &Config) -> Result<String, FmtErr
 
 fn tag_ident_str(ident: &TagIdent) -> String {
     match ident {
-        TagIdent::Path(path) => tidy_path(&quote!(#path).to_string()),
+        TagIdent::Path(path) => {
+            // Join path segments structurally: replacing ` :: ` in quoted
+            // source would also rewrite literals and macro arguments inside
+            // generic arguments, changing their meaning.
+            let mut output = String::new();
+            if path.leading_colon.is_some() {
+                output.push_str("::");
+            }
+            for (index, segment) in path.segments.iter().enumerate() {
+                if index > 0 {
+                    output.push_str("::");
+                }
+                output.push_str(&segment.ident.to_string());
+                match &segment.arguments {
+                    syn::PathArguments::None => {}
+                    syn::PathArguments::AngleBracketed(args) if args.colon2_token.is_some() => {
+                        output.push_str("::");
+                        let mut args = args.clone();
+                        args.colon2_token = None;
+                        output.push_str(&quote!(#args).to_string());
+                    }
+                    args => output.push_str(&quote!(#args).to_string()),
+                }
+            }
+            output
+        }
         TagIdent::Hyphenated(s) => s.clone(),
     }
-}
-
-/// `quote!` renders paths with spaces around `::` (e.g. `foo :: Bar`); this
-/// collapses that back down to idiomatic Rust spacing (`foo::Bar`).
-fn tidy_path(s: &str) -> String {
-    s.replace(" :: ", "::")
-        .replace(":: ", "::")
-        .replace(" ::", "::")
 }

@@ -255,6 +255,52 @@ fn robustness_cases_format_without_error_and_are_idempotent() {
 }
 
 #[test]
+fn component_paths_preserve_generic_argument_tokens() {
+    use quote::quote;
+    use sycamore_view_parser::ir::{Node, Root, TagIdent};
+
+    fn path_tokens(src: &str) -> String {
+        let file = syn::parse_file(src).unwrap();
+        let syn::Item::Fn(function) = &file.items[0] else {
+            panic!("expected a function")
+        };
+        let syn::Stmt::Macro(statement) = &function.block.stmts[0] else {
+            panic!("expected a macro")
+        };
+        let root: Root = syn::parse2(statement.mac.tokens.clone()).unwrap();
+        let [Node::Tag(tag)] = root.0.as_slice() else {
+            panic!("expected one tag")
+        };
+        let TagIdent::Path(path) = &tag.ident else {
+            panic!("expected a path")
+        };
+        quote!(#path).to_string()
+    }
+
+    let inputs = [
+        r##"fn f() { view! { Foo::<{ make!(" :: ") }> {} } }"##,
+        r###"fn f() { view! { ui::Foo::<{ make!(r#" :: "#) }>::Bar::<{ make!(b" :: ") }> {} } }"###,
+        "fn f() { view! { ::ui::nested::Component {} } }",
+    ];
+    for input in inputs {
+        let outcome = format_source(input, &Config::default()).unwrap();
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert_eq!(
+            path_tokens(input),
+            path_tokens(&outcome.output),
+            "{}",
+            outcome.output
+        );
+        assert_eq!(
+            format_source(&outcome.output, &Config::default())
+                .unwrap()
+                .output,
+            outcome.output
+        );
+    }
+}
+
+#[test]
 fn comments_between_macro_path_and_body_are_preserved() {
     let input = "fn f() { view /* important */ ! { div {} } }\n";
     let outcome = format_source(input, &Config::default()).unwrap();
