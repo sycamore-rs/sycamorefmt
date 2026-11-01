@@ -14,6 +14,7 @@ use quote::quote;
 use sycamore_view_parser::ir::{
     DynNode, IfNode, MatchNode, Node, Prop, PropType, Root, TagIdent, TagNode, TextNode,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
 use crate::error::FmtError;
@@ -228,7 +229,8 @@ fn print_tag(
     } else if props_all_single_line {
         let joined = rendered_props.join(", ");
         let inline = format!("({joined})");
-        if indent + head.chars().count() + inline.chars().count() <= cfg.max_width {
+        let column = display_column_after(indent, &head, cfg.tab_spaces);
+        if display_column_after(column, &inline, cfg.tab_spaces) <= cfg.max_width {
             inline
         } else {
             render_props_broken(&rendered_props, &inner_pad, &pad)
@@ -271,8 +273,9 @@ fn print_tag(
                     .collect::<Vec<_>>()
                     .join(" ");
                 let candidate = format!(" {{ {joined} }}");
-                let current_col = absolute_column_after(indent, &format!("{head}{props_part}"));
-                let full_width_used = current_col + candidate.chars().count();
+                let current_col =
+                    absolute_column_after(indent, &format!("{head}{props_part}"), cfg.tab_spaces);
+                let full_width_used = display_column_after(current_col, &candidate, cfg.tab_spaces);
                 if full_width_used <= cfg.max_width && !joined.is_empty() {
                     Some(candidate)
                 } else {
@@ -317,11 +320,25 @@ fn render_props_broken(rendered_props: &[String], inner_pad: &str, pad: &str) ->
 /// convention: first line has no leading indent, later lines are already
 /// absolute) is placed starting at column `indent`, returns the absolute
 /// column immediately after the end of `s`.
-fn absolute_column_after(indent: usize, s: &str) -> usize {
+fn absolute_column_after(indent: usize, s: &str, tab_spaces: usize) -> usize {
     match s.rfind('\n') {
-        Some(pos) => s[pos + 1..].chars().count(),
-        None => indent + s.chars().count(),
+        Some(pos) => display_column_after(0, &s[pos + 1..], tab_spaces),
+        None => display_column_after(indent, s, tab_spaces),
     }
+}
+
+/// Measures display columns, including tab stops in verbatim source literals.
+/// A zero-width indentation setting uses single-column tab stops, matching
+/// the source indentation logic in the formatting pipeline.
+fn display_column_after(mut column: usize, text: &str, tab_spaces: usize) -> usize {
+    let tab_width = tab_spaces.max(1);
+    for (index, segment) in text.split('\t').enumerate() {
+        if index > 0 {
+            column += tab_width - column % tab_width;
+        }
+        column += UnicodeWidthStr::width(segment);
+    }
+    column
 }
 
 fn print_prop(prop: &Prop, indent: usize, cfg: &Config) -> Result<String, FmtError> {

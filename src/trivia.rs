@@ -452,14 +452,23 @@ fn skip_non_code(source: &str, cursor: usize, limit: usize) -> Option<usize> {
 }
 
 fn keyword_at(source: &str, start: usize, limit: usize, keyword: &str) -> bool {
-    let bytes = source.as_bytes();
-    let end = start + keyword.len();
-    if end > limit || &bytes[start..end] != keyword.as_bytes() {
+    let Some(end) = start.checked_add(keyword.len()) else {
+        return false;
+    };
+    if end > limit || source.get(start..end) != Some(keyword) {
         return false;
     }
-    !bytes
-        .get(end)
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+
+    // Match Rust's identifier-continuation rules, not just ASCII: a tag
+    // such as `elseé` or `else` followed by a combining mark is not `else`.
+    let next = if end < limit {
+        source
+            .get(end..limit)
+            .and_then(|suffix| suffix.chars().next())
+    } else {
+        None
+    };
+    !next.is_some_and(|character| character == '_' || unicode_ident::is_xid_continue(character))
 }
 
 /// Returns whether `gap` contains one or more whitespace-only lines between

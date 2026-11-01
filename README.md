@@ -68,6 +68,8 @@ left untouched with a warning rather than risking lost source text.
 - The view printer uses `max_width` and `tab_spaces`, but prettyplease uses
   its own fixed layout width for embedded Rust. Its wrapping can therefore
   differ from the requested width, especially for deeply nested expressions.
+  View layout measures Unicode display columns, treating ambiguous-width
+  characters as narrow and using `tab_spaces` for tab stops.
 - Rust source whitespace inside an expression, including blank lines around
   nested views, is not preserved by the Rust AST printer. String literal
   contents are preserved.
