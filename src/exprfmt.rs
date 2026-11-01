@@ -7,8 +7,9 @@
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Expr, Pat};
+use syn::{Expr, Item, ItemFn, Pat, Stmt, Visibility};
 
 use crate::config::Config;
 use crate::error::FmtError;
@@ -22,11 +23,11 @@ pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, F
         ));
     }
 
-    let file: syn::File = syn::parse2(quote! {
+    let wrapper: syn::File = syn::parse2(quote! {
         fn __sycamorefmt_expr__() { (#expr) }
     })
     .map_err(FmtError::Parse)?;
-    let formatted = prettyplease::unparse(&file);
+    let formatted = prettyplease::unparse(&wrapper);
     let mut finder = crate::finder::MacroFinder::new();
     finder.visit_expr(expr);
     let formatted = if finder.found.is_empty() {
@@ -46,13 +47,23 @@ pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, F
         }
         outcome.output
     };
-    let body = function_body(&formatted)?;
-    let body = body.trim();
-    let body = body
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .ok_or_else(|| FmtError::Internal("expression wrapper lost its parentheses".into()))?;
-    Ok(reindent(body, 4, indent, cfg.tab_spaces))
+    let parsed = syn::parse_file(&formatted).map_err(FmtError::Parse)?;
+    let function = wrapper_function(&parsed, "__sycamorefmt_expr__")?;
+    let expr = function_expression(function)?;
+    let Expr::Paren(paren) = expr else {
+        return Err(FmtError::Internal(
+            "expression wrapper lost its parentheses".into(),
+        ));
+    };
+    if !paren.attrs.is_empty() {
+        return Err(FmtError::Internal(
+            "expression wrapper has unexpected attributes".into(),
+        ));
+    }
+    let (open, close) = delimiter_ranges(paren.paren_token.span);
+    let outer = expr.span().byte_range();
+    let inner = checked_inner_range(&formatted, outer, open, close, "expression wrapper")?;
+    Ok(reindent(inner.trim(), 4, indent, cfg.tab_spaces))
 }
 
 pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
@@ -64,29 +75,58 @@ pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<Stri
         ));
     }
 
-    let file: syn::File = syn::parse2(quote! {
+    let wrapper: syn::File = syn::parse2(quote! {
         fn __sycamorefmt_pattern__() {
             match __sycamorefmt_value { #pattern => (), }
         }
     })
     .map_err(FmtError::Parse)?;
-    let formatted = prettyplease::unparse(&file);
-    let start = formatted
-        .find("match __sycamorefmt_value {\n")
-        .map(|p| p + "match __sycamorefmt_value {\n".len())
-        .ok_or_else(|| FmtError::Internal("could not locate formatted match pattern".into()))?;
-    let end = formatted
-        .rfind(" => {}")
-        .filter(|&p| p >= start)
-        .ok_or_else(|| {
-            FmtError::Internal(format!("could not locate formatted match arm: {formatted}"))
-        })?;
-    Ok(reindent(
-        formatted[start..end].trim_start(),
-        8,
-        indent,
-        cfg.tab_spaces,
-    ))
+    let formatted = prettyplease::unparse(&wrapper);
+    let parsed = syn::parse_file(&formatted).map_err(FmtError::Parse)?;
+    let function = wrapper_function(&parsed, "__sycamorefmt_pattern__")?;
+    let Expr::Match(match_expr) = function_expression(function)? else {
+        return Err(FmtError::Internal(
+            "pattern wrapper lost its synthetic match expression".into(),
+        ));
+    };
+
+    if !match_expr.attrs.is_empty()
+        || !is_placeholder_path(&match_expr.expr)
+        || match_expr.arms.len() != 1
+    {
+        return Err(FmtError::Internal(
+            "pattern wrapper has an unexpected match structure".into(),
+        ));
+    }
+    let arm = &match_expr.arms[0];
+    if !arm.attrs.is_empty() || !is_unit(&arm.body) {
+        return Err(FmtError::Internal(
+            "pattern wrapper has an unexpected synthetic match arm".into(),
+        ));
+    }
+
+    let pattern_range = arm.pat.span().byte_range();
+    let (open, close) = delimiter_ranges(match_expr.brace_token.span);
+    let match_range = match_expr.span().byte_range();
+    let pattern = checked_contained_range(
+        &formatted,
+        pattern_range,
+        match_range,
+        open,
+        close,
+        "match pattern",
+    )?;
+    let pattern = pattern.trim();
+    // In syn 3, a match guard is part of Pat::Guard rather than a separate
+    // Arm field, so the pattern span must cover both the pattern and guard.
+    let reparsed: syn::Arm =
+        syn::parse_str(&format!("{pattern} => (),")).map_err(FmtError::Parse)?;
+    if reparsed.pat != arm.pat || !is_unit(&reparsed.body) {
+        return Err(FmtError::Internal(
+            "formatted match pattern span does not match its syntax tree".into(),
+        ));
+    }
+    Ok(reindent(pattern, 8, indent, cfg.tab_spaces))
 }
 
 // Pattern macros can have grammar and expansion behavior unknown to syn.
@@ -113,16 +153,147 @@ impl<'ast> Visit<'ast> for PatternMacroGuard {
     }
 }
 
-fn function_body(formatted: &str) -> Result<&str, FmtError> {
-    let start = formatted
-        .find('{')
-        .map(|p| p + 1)
-        .ok_or_else(|| FmtError::Internal("could not locate expression wrapper".into()))?;
-    let end = formatted
-        .rfind('}')
-        .filter(|&p| p >= start)
-        .ok_or_else(|| FmtError::Internal("could not locate expression wrapper end".into()))?;
-    Ok(&formatted[start..end])
+fn wrapper_function<'a>(file: &'a syn::File, expected_name: &str) -> Result<&'a ItemFn, FmtError> {
+    if file.shebang.is_some() || file.frontmatter.is_some() || !file.attrs.is_empty() {
+        return Err(FmtError::Internal(
+            "formatted wrapper has unexpected file-level syntax".into(),
+        ));
+    }
+    let [Item::Fn(function)] = file.items.as_slice() else {
+        return Err(FmtError::Internal(
+            "formatted wrapper is not exactly one synthetic function".into(),
+        ));
+    };
+    let signature = &function.sig;
+    if !function.attrs.is_empty()
+        || !matches!(function.vis, Visibility::Inherited)
+        || signature.ident != expected_name
+        || signature.constness.is_some()
+        || signature.asyncness.is_some()
+        || !matches!(signature.safety, syn::Safety::Default)
+        || signature.abi.is_some()
+        || signature.generics.lt_token.is_some()
+        || signature.generics.gt_token.is_some()
+        || !signature.generics.params.is_empty()
+        || signature.generics.where_clause.is_some()
+        || !signature.inputs.is_empty()
+        || signature.variadic.is_some()
+        || !matches!(signature.output, syn::ReturnType::Default)
+    {
+        return Err(FmtError::Internal(
+            "formatted wrapper has an unexpected synthetic function signature".into(),
+        ));
+    }
+    Ok(function)
+}
+
+fn function_expression(function: &ItemFn) -> Result<&Expr, FmtError> {
+    let [Stmt::Expr(expr, None)] = function.block.stmts.as_slice() else {
+        return Err(FmtError::Internal(
+            "formatted wrapper has an unexpected statement structure".into(),
+        ));
+    };
+    Ok(expr)
+}
+
+fn is_placeholder_path(expr: &Expr) -> bool {
+    let Expr::Path(path) = expr else {
+        return false;
+    };
+    path.attrs.is_empty()
+        && path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == 1
+        && path.path.segments[0].ident == "__sycamorefmt_value"
+        && matches!(path.path.segments[0].arguments, syn::PathArguments::None)
+}
+
+fn is_unit(expr: &Expr) -> bool {
+    match expr {
+        Expr::Tuple(tuple) => tuple.attrs.is_empty() && tuple.elems.is_empty(),
+        Expr::Block(block) => {
+            block.attrs.is_empty() && block.label.is_none() && block.block.stmts.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn delimiter_ranges(
+    span: proc_macro2::extra::DelimSpan,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    (span.open().byte_range(), span.close().byte_range())
+}
+
+fn checked_range<'a>(
+    src: &'a str,
+    range: std::ops::Range<usize>,
+    what: &str,
+) -> Result<&'a str, FmtError> {
+    if range.start > range.end
+        || range.end > src.len()
+        || !src.is_char_boundary(range.start)
+        || !src.is_char_boundary(range.end)
+    {
+        return Err(FmtError::Internal(format!(
+            "formatted {what} has an unsafe source range"
+        )));
+    }
+    src.get(range)
+        .ok_or_else(|| FmtError::Internal(format!("formatted {what} has an unsafe source range")))
+}
+
+fn checked_inner_range<'a>(
+    src: &'a str,
+    outer: std::ops::Range<usize>,
+    open: std::ops::Range<usize>,
+    close: std::ops::Range<usize>,
+    what: &str,
+) -> Result<&'a str, FmtError> {
+    checked_range(src, outer.clone(), what)?;
+    checked_range(src, open.clone(), what)?;
+    checked_range(src, close.clone(), what)?;
+    if open.end - open.start != 1
+        || close.end - close.start != 1
+        || open.start != outer.start
+        || close.end != outer.end
+        || open.end > close.start
+        || checked_range(src, open.clone(), what)? != "("
+        || checked_range(src, close.clone(), what)? != ")"
+    {
+        return Err(FmtError::Internal(format!(
+            "formatted {what} lost its expected parentheses"
+        )));
+    }
+    checked_range(src, open.end..close.start, what)
+}
+
+fn checked_contained_range<'a>(
+    src: &'a str,
+    content: std::ops::Range<usize>,
+    outer: std::ops::Range<usize>,
+    open: std::ops::Range<usize>,
+    close: std::ops::Range<usize>,
+    what: &str,
+) -> Result<&'a str, FmtError> {
+    checked_range(src, outer.clone(), what)?;
+    checked_range(src, content.clone(), what)?;
+    checked_range(src, open.clone(), what)?;
+    checked_range(src, close.clone(), what)?;
+    if open.end - open.start != 1
+        || close.end - close.start != 1
+        || open.start < outer.start
+        || close.end != outer.end
+        || open.end > close.start
+        || content.start < open.end
+        || content.end > close.start
+        || checked_range(src, open.clone(), what)? != "{"
+        || checked_range(src, close.clone(), what)? != "}"
+    {
+        return Err(FmtError::Internal(format!(
+            "formatted {what} has an unsafe or unexpected source range"
+        )));
+    }
+    checked_range(src, content, what)
 }
 
 // prettyplease uses four spaces per level. Translate indentation to the
