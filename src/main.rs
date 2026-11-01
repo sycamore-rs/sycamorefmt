@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
+    /// Fail and leave affected inputs unchanged if formatting emits warnings.
+    #[arg(long)]
+    fail_on_warnings: bool,
+
     /// Rust edition to format for.
     #[arg(long, default_value = "2024", value_parser = parse_edition)]
     edition: String,
@@ -74,6 +78,9 @@ fn run_stdin(args: &Cli, config: &Config) -> ExitCode {
         Ok(outcome) => {
             for warning in &outcome.warnings {
                 eprintln!("warning: {warning}");
+            }
+            if args.fail_on_warnings && !outcome.warnings.is_empty() {
+                return ExitCode::from(2);
             }
             if args.check {
                 if outcome.changed {
@@ -148,6 +155,10 @@ fn run_files(args: &Cli, config: &Config) -> ExitCode {
             Ok(outcome) => {
                 for warning in &outcome.warnings {
                     eprintln!("{}: warning: {warning}", path.display());
+                }
+                if args.fail_on_warnings && !outcome.warnings.is_empty() {
+                    any_error = true;
+                    continue;
                 }
                 if outcome.changed {
                     any_changed = true;
