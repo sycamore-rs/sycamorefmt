@@ -13,7 +13,10 @@ sycamorefmt [FILES]
 With no files, sycamorefmt reads a Rust source file from standard input and
 writes the result to standard output. Use `--check` to report files that would
 change without writing them, and `--max-width` to control view layout. Run
-`sycamorefmt --help` for all options.
+`sycamorefmt --help` for all options. Use `--fail-on-warnings` to fail whenever
+the formatter emits warnings (exit status 2). An input that produces warnings
+is not emitted to stdout or written to disk; this applies to stdin and file
+inputs, including when combined with `--check`.
 
 **Only view macros are formatted.** The surrounding Rust source is left
 unchanged; run `rustfmt` separately if you want to format it too. Neither
@@ -36,7 +39,9 @@ attributes, and crash durability of the directory entry are not guaranteed.
    preserves blank lines between view nodes.
 3. Format embedded Rust expressions and match patterns in-process with
    [`prettyplease`](https://github.com/dtolnay/prettyplease), a `syn` AST
-   pretty-printer. Nested views inside expressions are formatted recursively.
+   pretty-printer. Views nested in ordinary expression syntax are formatted
+   recursively, but the formatter does not inspect the token input to another
+   macro.
 4. Splice formatted views into the original source using byte spans, without
    rewriting unrelated Rust or its comments.
 
@@ -47,8 +52,7 @@ of prettyplease and a dedicated printer; sycamorefmt uses upstream
 prettyplease and its own Sycamore view printer.
 
 A view that cannot be parsed, is not brace-delimited, or contains comments is
-left untouched (with a warning for parse failures and comments) rather than
-risking lost source text.
+left untouched with a warning rather than risking lost source text.
 
 ## Known limitations
 
@@ -62,3 +66,10 @@ risking lost source text.
 - Rust source whitespace inside an expression, including blank lines around
   nested views, is not preserved by the Rust AST printer. String literal
   contents are preserved.
+- Discovery follows Rust syntax parsed into the `syn` AST and the ordinary
+  expression ASTs inside Sycamore views; it does not recurse into any macro's
+  opaque input tokens. A `view!` inside another macro's tokens—whether that
+  outer macro is top-level or appears in an expression—is left untouched,
+  because the outer macro may inspect or stringify those tokens. Views are
+  skipped with a warning if opaque macro input cannot be preserved safely;
+  macro invocations in patterns are currently skipped for this reason.

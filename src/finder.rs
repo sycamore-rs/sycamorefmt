@@ -1,16 +1,18 @@
-//! Locates `view! { ... }` macro invocations within a parsed Rust file.
+//! Locates `view! { ... }` macro invocations represented as nodes in a `syn` AST.
 //!
-//! Only "top-level" invocations that `syn`'s AST walker can see are found
-//! here. A `view!` macro nested inside the token stream of another (already
-//! opaque) macro invocation -- for example a `view! { ... }` written inside an
-//! expression that is itself inside another `view! { ... }` -- is invisible to
-//! `syn::visit::Visit`, because `syn` does not know how to parse the inner
-//! macro's grammar and therefore stores its contents as an opaque
-//! `TokenStream`. Those nested invocations are instead handled recursively by
-//! [`crate::exprfmt`], which re-runs the whole pipeline over the
-//! re-serialized tokens of any expression that contains them.
+//! The finder checks macro invocations reached while walking ordinary Rust
+//! syntax, but never examines a macro's token stream. `syn` stores those tokens
+//! as opaque input because it cannot know the invoked macro's grammar. Thus a
+//! `view!` inside an arbitrary macro invocation (including a top-level call or
+//! a call appearing in an expression) is not discovered and must not be
+//! rewritten: that macro may inspect or stringify its input. By contrast,
+//! [`crate::exprfmt`] parses Rust expressions found in an actual Sycamore view
+//! body and runs this finder on their ASTs, so a `view!` nested in ordinary
+//! expression syntax can be formatted recursively. That recursion stops at
+//! every macro-token boundary.
 
 use syn::Macro;
+use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
 /// A `view!`-like macro invocation found while walking a `syn::File`.
@@ -19,8 +21,8 @@ pub struct FoundMacro {
     pub mac: Macro,
 }
 
-/// Visitor that collects every macro invocation whose path's last segment is
-/// `view`, in source order.
+/// Visitor that collects visible macro AST nodes whose path's last segment is
+/// `view`, in source order. It does not search macro token streams.
 #[derive(Default)]
 pub struct MacroFinder {
     pub found: Vec<FoundMacro>,
@@ -39,7 +41,7 @@ pub fn is_view_macro(mac: &Macro) -> bool {
     mac.path
         .segments
         .last()
-        .map(|seg| seg.ident == "view")
+        .map(|seg| seg.ident.unraw() == "view")
         .unwrap_or(false)
 }
 

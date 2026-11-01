@@ -70,6 +70,16 @@ fn strict_check_reports_skipped_invalid_views() {
 }
 
 #[test]
+fn strict_check_reports_unsupported_view_delimiters() {
+    for input in ["fn f() { view!(div()); }\n", "fn f() { view![div()]; }\n"] {
+        let output = stdin(&["--check", "--fail-on-warnings"], input);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("warning:"));
+    }
+}
+
+#[test]
 fn strict_mode_keeps_normal_check_statuses() {
     assert!(
         stdin(&["--check", "--fail-on-warnings"], "fn f() {}\n")

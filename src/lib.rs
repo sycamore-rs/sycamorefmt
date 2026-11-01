@@ -10,6 +10,7 @@ mod error;
 mod exprfmt;
 mod finder;
 mod format;
+mod lex;
 mod printer;
 mod trivia;
 

@@ -3,16 +3,25 @@
 //! `prettyplease` prints a `syn::File`, so we put each AST in a small
 //! synthetic function and extract its rendering. Afterwards we format any
 //! nested `view!` macros in that rendering using the normal splice pipeline.
+//! Opaque macro source is restored by the enclosing view splice.
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::quote;
-use syn::visit::Visit;
+use syn::visit::{self, Visit};
 use syn::{Expr, Pat};
 
 use crate::config::Config;
 use crate::error::FmtError;
 
 pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+    let mut guard = PatternMacroGuard::default();
+    guard.visit_expr(expr);
+    if guard.found {
+        return Err(FmtError::Internal(
+            "cannot safely format an expression containing a macro in a pattern".into(),
+        ));
+    }
+
     let file: syn::File = syn::parse2(quote! {
         fn __sycamorefmt_expr__() { (#expr) }
     })
@@ -47,6 +56,14 @@ pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, F
 }
 
 pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+    let mut guard = PatternMacroGuard::default();
+    guard.visit_pat(pattern);
+    if guard.found {
+        return Err(FmtError::Internal(
+            "cannot safely format a pattern containing a macro invocation".into(),
+        ));
+    }
+
     let file: syn::File = syn::parse2(quote! {
         fn __sycamorefmt_pattern__() {
             match __sycamorefmt_value { #pattern => (), }
@@ -70,6 +87,30 @@ pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<Stri
         indent,
         cfg.tab_spaces,
     ))
+}
+
+// Pattern macros can have grammar and expansion behavior unknown to syn.
+// Decline the entire view instead of guessing how to restore their tokens.
+#[derive(Default)]
+struct PatternMacroGuard {
+    in_pattern: bool,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for PatternMacroGuard {
+    fn visit_pat(&mut self, pattern: &'ast Pat) {
+        let before = self.in_pattern;
+        self.in_pattern = true;
+        visit::visit_pat(self, pattern);
+        self.in_pattern = before;
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if self.in_pattern {
+            self.found = true;
+        }
+        visit::visit_macro(self, mac);
+    }
 }
 
 fn function_body(formatted: &str) -> Result<&str, FmtError> {
