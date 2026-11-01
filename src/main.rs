@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -96,6 +96,40 @@ fn run_stdin(args: &Cli, config: &Config) -> ExitCode {
     }
 }
 
+fn write_file_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Resolve the destination first so replacing a symlink updates its target instead of
+    // replacing the symlink itself with a regular file.
+    let destination = fs::canonicalize(path)?;
+    let metadata = fs::metadata(&destination)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination is not a regular file",
+        ));
+    }
+    // Replacing a file only requires write permission on its directory, but
+    // formatting a read-only source should still fail as an in-place write
+    // would. Opening without truncation checks that permission safely.
+    fs::OpenOptions::new().write(true).open(&destination)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("destination has no parent directory"))?;
+
+    // NamedTempFile creates a collision-resistant file with create_new semantics and removes
+    // it on drop if any write, flush, permission, or replacement step fails.
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(contents)?;
+    temporary.flush()?;
+    temporary
+        .as_file()
+        .set_permissions(metadata.permissions())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
 fn run_files(args: &Cli, config: &Config) -> ExitCode {
     let mut any_changed = false;
     let mut any_error = false;
@@ -119,7 +153,7 @@ fn run_files(args: &Cli, config: &Config) -> ExitCode {
                     any_changed = true;
                     if args.check {
                         eprintln!("{}: would be reformatted", path.display());
-                    } else if let Err(e) = fs::write(path, &outcome.output) {
+                    } else if let Err(e) = write_file_atomically(path, outcome.output.as_bytes()) {
                         eprintln!("error: failed to write {}: {e}", path.display());
                         any_error = true;
                     }
@@ -138,5 +172,19 @@ fn run_files(args: &Cli, config: &Config) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_file_atomically;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn refuses_to_replace_non_regular_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = write_file_atomically(dir.path(), b"formatted").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(dir.path().is_dir());
     }
 }

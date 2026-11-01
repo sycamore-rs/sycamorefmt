@@ -29,5 +29,6 @@ syn = { version = "3.0", features = [
 	"printing",
 ] }
 sycamore-view-parser = "0.9.4"
+tempfile = "3.27"
 
 [dev-dependencies]

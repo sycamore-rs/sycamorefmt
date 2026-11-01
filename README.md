@@ -21,6 +21,12 @@ installing nor running sycamorefmt requires a `rustfmt` executable. The
 `--edition` option is retained for compatibility; the `syn` parser and the
 in-process printer do not currently use it to change their behavior.
 
+When formatting files, sycamorefmt writes a temporary file beside the resolved
+source file and replaces it only after the write succeeds. Symlinks are followed
+and permission bits are retained. Because replacement creates a new file,
+other hard links still point to the old contents; ownership, ACLs, extended
+attributes, and crash durability of the directory entry are not guaranteed.
+
 ## How it works
 
 1. Parse the source with `syn` and locate macro invocations whose paths end in
