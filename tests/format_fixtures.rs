@@ -1,37 +1,8 @@
 //! Fixture-based and property-based tests for the formatting pipeline.
-//!
-//! These tests shell out to the real `rustfmt` binary (via
-//! `sycamorefmt::format_source`), so they only run meaningfully in an
-//! environment that has `rustfmt` on `PATH`. If it isn't available, the
-//! tests print a message and skip themselves rather than failing with a
-//! confusing error, since that's an environment issue rather than a bug in
-//! this crate.
 
 use std::path::Path;
-use std::process::Command;
 
 use sycamorefmt::{Config, format_source};
-
-/// Returns `true` if a real `rustfmt` binary appears to be usable.
-fn rustfmt_available() -> bool {
-    Command::new("rustfmt")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-macro_rules! skip_without_rustfmt {
-    () => {
-        if !rustfmt_available() {
-            eprintln!(
-                "skipping {}: `rustfmt` is not available on PATH",
-                concat!(module_path!(), "::", "test")
-            );
-            return;
-        }
-    };
-}
 
 fn read_fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,7 +45,6 @@ fn run_fixture(input_name: &str, expected_name: &str) {
 
 #[test]
 fn minimal_view_is_left_untouched() {
-    skip_without_rustfmt!();
     let input = read_fixture("minimal.input.rs");
     let cfg = Config::default();
     let outcome = format_source(&input, &cfg).expect("formatting should succeed");
@@ -87,25 +57,21 @@ fn minimal_view_is_left_untouched() {
 
 #[test]
 fn messy_whitespace_is_normalized() {
-    skip_without_rustfmt!();
     run_fixture("messy.input.rs", "messy.expected.rs");
 }
 
 #[test]
 fn long_prop_list_is_broken_across_lines() {
-    skip_without_rustfmt!();
     run_fixture("props_break.input.rs", "props_break.expected.rs");
 }
 
 #[test]
 fn whitespace_is_preserved() {
-    skip_without_rustfmt!();
     run_fixture("whitespace.input.rs", "whitespace.expected.rs");
 }
 
 #[test]
 fn blank_line_trivia_is_preserved_and_normalized() {
-    skip_without_rustfmt!();
     run_fixture("trivia.input.rs", "trivia.expected.rs");
 }
 
@@ -211,7 +177,6 @@ fn f(choice: Option<i32>) -> View {
 
 #[test]
 fn if_and_match_nodes_render_structured_branches() {
-    skip_without_rustfmt!();
     let input = r#"
 fn f(show: bool, ready: bool, choice: Option<i32>) -> View {
     view! {
@@ -265,7 +230,6 @@ fn f(show: bool, ready: bool, choice: Option<i32>) -> View {
 
 #[test]
 fn robustness_cases_format_without_error_and_are_idempotent() {
-    skip_without_rustfmt!();
     let cfg = Config::default();
 
     for (i, input) in ROBUSTNESS_CASES.iter().enumerate() {
@@ -288,6 +252,75 @@ fn robustness_cases_format_without_error_and_are_idempotent() {
             first.output, second.output
         );
     }
+}
+
+#[test]
+fn comments_between_macro_path_and_body_are_preserved() {
+    let input = "fn f() { view /* important */ ! { div {} } }\n";
+    let outcome = format_source(input, &Config::default()).unwrap();
+    assert_eq!(outcome.output, input);
+    assert!(!outcome.warnings.is_empty());
+}
+
+#[test]
+fn malformed_nested_view_leaves_outer_view_unchanged() {
+    let input = "fn f() { view! { div { (view! { div(=) }) } } }\n";
+    let outcome = format_source(input, &Config::default()).unwrap();
+    assert_eq!(outcome.output, input);
+    assert!(!outcome.warnings.is_empty());
+}
+
+#[test]
+fn nested_views_respect_nondefault_indentation() {
+    let input = "fn f() {\n  view! { div { ({ view! { span { \"hello\" } } }) } }\n}\n";
+    let cfg = Config {
+        tab_spaces: 2,
+        ..Config::default()
+    };
+    let first = format_source(input, &cfg).unwrap();
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let lines: Vec<_> = first.output.lines().collect();
+    let nested = lines
+        .iter()
+        .position(|line| line.contains("view! {") && !line.trim_start().starts_with("view! {"))
+        .unwrap_or_else(|| {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains("view! {"))
+                .nth(1)
+                .unwrap()
+                .0
+        });
+    let macro_indent = lines[nested].len() - lines[nested].trim_start().len();
+    let child_indent = lines[nested + 1].len() - lines[nested + 1].trim_start().len();
+    assert_eq!(
+        child_indent,
+        macro_indent + cfg.tab_spaces,
+        "{}",
+        first.output
+    );
+    assert_eq!(
+        format_source(&first.output, &cfg).unwrap().output,
+        first.output
+    );
+}
+
+#[test]
+fn multiline_string_contents_are_not_reindented() {
+    let input = "fn f() {\n    view! { div(title={ make(\"first\n  second\nthird\") }) }\n}\n";
+    let cfg = Config::default();
+    let output = format_source(input, &cfg).unwrap();
+    assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+    assert!(
+        output.output.contains("\"first\n  second\nthird\""),
+        "{}",
+        output.output
+    );
+    assert_eq!(
+        format_source(&output.output, &cfg).unwrap().output,
+        output.output
+    );
 }
 
 /// Parses `src` as a Rust file and asserts that every `view!`-like macro

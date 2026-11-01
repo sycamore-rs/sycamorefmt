@@ -3,12 +3,11 @@
 /// Configuration controlling how `sycamorefmt` formats a piece of Rust source.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Maximum line width to aim for, both for the surrounding Rust code
-    /// (passed through to `rustfmt` as `max_width`) and for the `view! { ... }`
-    /// pretty-printer.
+    /// Maximum line width to aim for in the `view! { ... }` printer.
+    /// Embedded Rust expressions use prettyplease's fixed width.
     pub max_width: usize,
-    /// Rust edition to pass to `rustfmt` (and to use when parsing input, if
-    /// that ever becomes edition-sensitive).
+    /// Retained for CLI/API compatibility; parsing and printing are currently
+    /// edition-independent.
     pub edition: String,
     /// Number of spaces per indentation level.
     pub tab_spaces: usize,

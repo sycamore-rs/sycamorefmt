@@ -34,14 +34,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-fn rustfmt_available() -> bool {
-    Command::new("rustfmt")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 #[test]
 fn version_and_help_are_provided_by_clap() {
     let version = run(&["--version"]);
@@ -86,12 +78,7 @@ fn edition_and_max_width_are_validated() {
 
 #[test]
 fn stdin_check_and_file_modes_keep_their_exit_behavior() {
-    if !rustfmt_available() {
-        eprintln!("skipping CLI formatting test: `rustfmt` is not available on PATH");
-        return;
-    }
-
-    let input = b"fn main(){println!(\"hello\");}\n";
+    let input = b"fn main(){view!{div{\"hello\"}};}\n";
     let formatted = run_with_stdin(&[], input);
     assert!(formatted.status.success(), "{}", stderr(&formatted));
     assert!(!formatted.stdout.is_empty());

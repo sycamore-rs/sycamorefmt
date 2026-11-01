@@ -1,6 +1,5 @@
 //! `sycamorefmt`: a formatter for Sycamore's `view! { ... }` macro syntax,
-//! built on top of `rustfmt` and the project's own `sycamore-view-parser`
-//! crate.
+//! using the project's own `sycamore-view-parser` crate.
 //!
 //! The public entry point is [`format_source`], which formats a complete
 //! Rust source file (or self-contained snippet) and reports whether
@@ -12,7 +11,6 @@ mod exprfmt;
 mod finder;
 mod format;
 mod printer;
-mod rustfmt;
 mod trivia;
 
 pub use config::Config;

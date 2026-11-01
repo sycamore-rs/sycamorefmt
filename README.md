@@ -1,7 +1,7 @@
 # sycamorefmt
 
 A code formatter for [Sycamore](https://github.com/sycamore-rs/sycamore)'s
-`view! { ... }` macro syntax, built on top of `rustfmt`.
+`view! { ... }` macro syntax.
 
 ## Usage
 
@@ -10,48 +10,49 @@ cargo install sycamorefmt
 sycamorefmt [FILES]
 ```
 
+With no files, sycamorefmt reads a Rust source file from standard input and
+writes the result to standard output. Use `--check` to report files that would
+change without writing them, and `--max-width` to control view layout. Run
+`sycamorefmt --help` for all options.
+
+**Only view macros are formatted.** The surrounding Rust source is left
+unchanged; run `rustfmt` separately if you want to format it too. Neither
+installing nor running sycamorefmt requires a `rustfmt` executable. The
+`--edition` option is retained for compatibility; the `syn` parser and the
+in-process printer do not currently use it to change their behavior.
+
 ## How it works
 
-1. The whole input file is first run through the real `rustfmt` binary. This
-   normalizes all the "plain Rust" parts of the file (imports, function
-   signatures, indentation, etc). `rustfmt` cannot understand the `view!`
-   grammar, so it leaves the contents of any `view! { ... }` invocation
-   byte-for-byte untouched -- but it does correctly indent the line the macro
-   call itself sits on.
-2. `sycamorefmt` then walks the resulting syntax tree (via `syn::visit::Visit`)
-   to find every macro invocation whose path ends in `view` (matching both
-   `view!{...}` and qualified paths like `sycamore::view!{...}`).
-3. Each invocation's token stream is parsed using `sycamore-view-parser`
-   0.9.4 or newer, producing the same `ir::Root`/`Node`/`Prop`/... tree that
-   `sycamore-macro` itself uses for code generation. This includes conditional
-   (`if`/`else if`/`else`) and `match` view nodes.
-4. That tree is pretty-printed with a small width-aware printer, and the
-   result is spliced back into the file in place of the original tokens,
-   using exact byte offsets (`proc_macro2::Span::byte_range()`) so nothing
-   outside the macro's braces is disturbed.
-5. Rust expressions embedded in the view (dyn-node bodies, prop values) are
-   formatted by re-serializing them with `quote!` and running them back
-   through the *same* pipeline (steps 1-4) inside a throwaway wrapper
-   function. This means a `view! { ... }` macro nested inside an expression
-   (e.g. inside an `if`/`else` that each produce a `View`) is found and
-   formatted recursively, even though it's invisible to the outer file's
-   syntax tree.
+1. Parse the source with `syn` and locate macro invocations whose paths end in
+   `view`, including qualified paths such as `sycamore::view!`.
+2. Parse each brace-delimited body with `sycamore-view-parser`, the same parser
+   used by `sycamore-macro`. A width-aware printer renders its view AST and
+   preserves blank lines between view nodes.
+3. Format embedded Rust expressions and match patterns in-process with
+   [`prettyplease`](https://github.com/dtolnay/prettyplease), a `syn` AST
+   pretty-printer. Nested views inside expressions are formatted recursively.
+4. Splice formatted views into the original source using byte spans, without
+   rewriting unrelated Rust or its comments.
 
-Any `view!` body that can't be parsed, that isn't brace-delimited, or that
-appears to contain a comment (comments are not currently preserved through
-the pretty-printer, so we conservatively leave such bodies untouched) is
-skipped with a warning rather than causing the whole run to fail.
+Like [leptosfmt](https://github.com/bram209/leptosfmt), this uses a
+pretty-printer derived from Oppen's algorithm rather than launching a
+`rustfmt` process for each embedded expression. Leptosfmt uses its own fork
+of prettyplease and a dedicated printer; sycamorefmt uses upstream
+prettyplease and its own Sycamore view printer.
+
+A view that cannot be parsed, is not brace-delimited, or contains comments is
+left untouched (with a warning for parse failures and comments) rather than
+risking lost source text.
 
 ## Known limitations
 
-- Comments inside a `view! { ... }` body are not preserved; such bodies are
-  detected heuristically (presence of `//` or `/*`) and left untouched
-  rather than risking silently dropping them.
-- Only brace-delimited macro invocations (`view! { ... }`) are reformatted;
-  `view!(...)` / `view![...]` are left as-is.
-- Width-fitting for embedded Rust expressions is approximate in deeply
-  nested contexts: expressions are formatted via a wrapper function at a
-  fixed base indentation and then shifted into place, so `rustfmt`'s own
-  line-breaking decisions are made relative to that wrapper's column, not
-  the expression's final column. Output is always valid, just occasionally
-  not perfectly width-optimal at deep nesting levels.
+- Comments inside a `view!` body are not preserved by the view parser, so the
+  entire body is left untouched when comments are detected.
+- Only brace-delimited invocations are formatted; `view!(...)` and
+  `view![...]` are left as-is.
+- The view printer uses `max_width` and `tab_spaces`, but prettyplease uses
+  its own fixed layout width for embedded Rust. Its wrapping can therefore
+  differ from the requested width, especially for deeply nested expressions.
+- Rust source whitespace inside an expression, including blank lines around
+  nested views, is not preserved by the Rust AST printer. String literal
+  contents are preserved.

@@ -17,7 +17,7 @@ use sycamore_view_parser::ir::{
 
 use crate::config::Config;
 use crate::error::FmtError;
-use crate::exprfmt::format_expr;
+use crate::exprfmt::{format_expr, format_pattern};
 use crate::trivia::{ControlSpacing, SpacingNode, SpacingRoot};
 
 /// Renders every node in `root`, one per line, with every line (including
@@ -162,37 +162,6 @@ fn print_match(
     }
 }
 
-fn format_pattern(pattern: &syn::Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
-    let pattern_tokens = quote!(#pattern).to_string();
-    let wrapper = format!(
-        "fn __sycamorefmt_pattern__() {{\n    match __sycamorefmt_value {{\n        {pattern_tokens} => (),\n    }}\n}}\n"
-    );
-    let formatted = crate::rustfmt::run(&wrapper, cfg)?;
-    let arm_start = formatted
-        .find("    match __sycamorefmt_value {\n")
-        .map(|pos| pos + "    match __sycamorefmt_value {\n".len())
-        .ok_or_else(|| FmtError::Internal("could not locate formatted match pattern".into()))?;
-    let arrow = formatted
-        .rfind(" => (),")
-        .filter(|pos| *pos >= arm_start)
-        .ok_or_else(|| FmtError::Internal("could not locate formatted match arm".into()))?;
-    let pattern = &formatted[arm_start..arrow];
-    let base = "        ";
-    let mut lines = pattern.lines();
-    let first = lines
-        .next()
-        .unwrap_or_default()
-        .strip_prefix(base)
-        .unwrap_or_else(|| pattern.trim_start());
-    let mut rendered = first.to_string();
-    for line in lines {
-        rendered.push('\n');
-        rendered.push_str(&" ".repeat(indent));
-        rendered.push_str(line.strip_prefix(base).unwrap_or_else(|| line.trim_start()));
-    }
-    Ok(rendered)
-}
-
 fn print_block(
     root: &Root,
     spacing: &SpacingRoot,
@@ -316,7 +285,18 @@ fn print_tag(
         match inline_candidate {
             Some(c) => c,
             None => {
-                let block = print_root(&tag.children, spacing, inner_indent, cfg)?;
+                let mut block = String::new();
+                for (index, child) in rendered_children.iter().enumerate() {
+                    if index > 0 {
+                        block.push_str(if spacing.has_blank_line_between(index - 1) {
+                            "\n\n"
+                        } else {
+                            "\n"
+                        });
+                    }
+                    block.push_str(&inner_pad);
+                    block.push_str(&child.text);
+                }
                 format!(" {{\n{block}\n{pad}}}")
             }
         }

@@ -1,123 +1,124 @@
-//! Formatting of Rust expressions (`view!` prop values and dyn-node bodies).
+//! In-process Rust AST formatting for expressions and patterns in views.
 //!
-//! Rather than hand-rolling a Rust expression pretty-printer, we delegate to
-//! `rustfmt` by re-serializing the expression's tokens with `quote!` and
-//! wrapping them in a throwaway function body, then extracting the formatted
-//! result back out. This is run through the *same* [`crate::format::format_source`]
-//! pipeline used for whole files, which means any `view! { ... }` macro
-//! nested inside the expression (a common pattern, e.g. an `if`/`else` that
-//! each produce a `View` via their own `view!` call) gets recursively found
-//! and formatted too.
+//! `prettyplease` prints a `syn::File`, so we put each AST in a small
+//! synthetic function and extract its rendering. Afterwards we format any
+//! nested `view!` macros in that rendering using the normal splice pipeline.
 
+use proc_macro2::{TokenStream, TokenTree};
 use quote::quote;
-use syn::Expr;
+use syn::visit::Visit;
+use syn::{Expr, Pat};
 
 use crate::config::Config;
 use crate::error::FmtError;
-use crate::format;
 
-const WRAPPER_FN: &str = "__sycamorefmt_expr__";
-
-/// Renders `expr` as formatted Rust source.
-///
-/// The returned string's first line has no leading indentation (the caller
-/// is expected to place it after some prefix on the current line), but any
-/// additional lines are indented with `indent` spaces, ready to be inserted
-/// as-is.
 pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, FmtError> {
-    // Some expressions (struct literals in particular, e.g. `Foo { x: 1 }`)
-    // are not allowed to appear directly at the start of a statement/tail
-    // expression position -- Rust's grammar requires them to be
-    // parenthesized there to avoid ambiguity with a block. Since `quote!`
-    // re-serializes the expression without whatever parentheses its
-    // *original* surrounding syntax happened to provide (e.g. a `view!`
-    // dyn-node's own `( ... )`), we always add one layer of parentheses
-    // ourselves before wrapping, and strip it back off after formatting.
-    let raw = quote!(#expr).to_string();
-    let wrapped = format!("fn {WRAPPER_FN}() {{\n({raw})\n}}\n");
-
-    let outcome = format::format_source(&wrapped, cfg)?;
-
-    let body = extract_fn_body(&outcome.output).ok_or_else(|| {
-        FmtError::Internal(format!(
-            "could not extract expression body from rustfmt output:\n{}",
-            outcome.output
-        ))
-    })?;
-    let body = strip_wrapping_parens(&body);
-
-    Ok(reindent(&body, cfg.tab_spaces, indent))
-}
-
-/// Given rustfmt's output for `fn __sycamorefmt_expr__() { <body> }`,
-/// extracts just `<body>` (still indented one level, i.e. by
-/// `cfg.tab_spaces` spaces, since rustfmt always places a non-empty fn body
-/// on its own indented lines).
-fn extract_fn_body(formatted: &str) -> Option<String> {
-    let mut lines: Vec<&str> = formatted.lines().collect();
-    while matches!(lines.last(), Some(l) if l.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.len() < 2 {
-        return None;
-    }
-    let first = *lines.first()?;
-    if !first.trim_end().ends_with('{') {
-        return None;
-    }
-    let last = *lines.last()?;
-    if last.trim() != "}" {
-        return None;
-    }
-    let body_lines = &lines[1..lines.len() - 1];
-    Some(body_lines.join("\n"))
-}
-
-/// Strips exactly one layer of wrapping parentheses added by
-/// [`format_expr`]: an opening `(` that is the first non-whitespace
-/// character on the body's first line, and a closing `)` that is the last
-/// non-whitespace character on the body's last line. `rustfmt` never
-/// removes or relocates parentheses on its own, so these are guaranteed
-/// (barring a bug elsewhere) to be exactly the pair we added.
-fn strip_wrapping_parens(body: &str) -> String {
-    let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
-    if let Some(first) = lines.first_mut()
-        && let Some(pos) = first.find('(')
-        && first[..pos].trim().is_empty()
-    {
-        first.remove(pos);
-    }
-    if let Some(last) = lines.last_mut()
-        && let Some(pos) = last.rfind(')')
-        && last[pos + 1..].trim().is_empty()
-    {
-        last.remove(pos);
-    }
-    lines.join("\n")
-}
-
-/// Shifts every line of `body` from a base indentation of `from` spaces to a
-/// base indentation of `to` spaces, preserving any additional nested
-/// indentation. The first line is left with no leading whitespace at all,
-/// since the caller is responsible for placing it after existing text on the
-/// current line.
-fn reindent(body: &str, from: usize, to: usize) -> String {
-    let from_prefix = " ".repeat(from);
-    let to_prefix = " ".repeat(to);
-    let mut out_lines = Vec::with_capacity(body.lines().count());
-    for (i, line) in body.lines().enumerate() {
-        if line.trim().is_empty() {
-            out_lines.push(String::new());
-            continue;
+    let file: syn::File = syn::parse2(quote! {
+        fn __sycamorefmt_expr__() { (#expr) }
+    })
+    .map_err(FmtError::Parse)?;
+    let formatted = prettyplease::unparse(&file);
+    let mut finder = crate::finder::MacroFinder::new();
+    finder.visit_expr(expr);
+    let formatted = if finder.found.is_empty() {
+        formatted
+    } else {
+        // The wrapper has prettyplease's four-space indentation. Render nested
+        // views in that same coordinate system; reindent the whole expression
+        // to the caller's configured width exactly once below.
+        let mut wrapper_cfg = cfg.clone();
+        wrapper_cfg.tab_spaces = 4;
+        let outcome = crate::format::format_source(&formatted, &wrapper_cfg)?;
+        if !outcome.warnings.is_empty() {
+            return Err(FmtError::Internal(format!(
+                "could not format nested view: {}",
+                outcome.warnings.join("; ")
+            )));
         }
-        let stripped = line
-            .strip_prefix(&from_prefix)
-            .unwrap_or_else(|| line.trim_start());
-        if i == 0 {
-            out_lines.push(stripped.to_string());
-        } else {
-            out_lines.push(format!("{to_prefix}{stripped}"));
+        outcome.output
+    };
+    let body = function_body(&formatted)?;
+    let body = body.trim();
+    let body = body
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| FmtError::Internal("expression wrapper lost its parentheses".into()))?;
+    Ok(reindent(body, 4, indent, cfg.tab_spaces))
+}
+
+pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
+    let file: syn::File = syn::parse2(quote! {
+        fn __sycamorefmt_pattern__() {
+            match __sycamorefmt_value { #pattern => (), }
+        }
+    })
+    .map_err(FmtError::Parse)?;
+    let formatted = prettyplease::unparse(&file);
+    let start = formatted
+        .find("match __sycamorefmt_value {\n")
+        .map(|p| p + "match __sycamorefmt_value {\n".len())
+        .ok_or_else(|| FmtError::Internal("could not locate formatted match pattern".into()))?;
+    let end = formatted
+        .rfind(" => {}")
+        .filter(|&p| p >= start)
+        .ok_or_else(|| {
+            FmtError::Internal(format!("could not locate formatted match arm: {formatted}"))
+        })?;
+    Ok(reindent(
+        formatted[start..end].trim_start(),
+        8,
+        indent,
+        cfg.tab_spaces,
+    ))
+}
+
+fn function_body(formatted: &str) -> Result<&str, FmtError> {
+    let start = formatted
+        .find('{')
+        .map(|p| p + 1)
+        .ok_or_else(|| FmtError::Internal("could not locate expression wrapper".into()))?;
+    let end = formatted
+        .rfind('}')
+        .filter(|&p| p >= start)
+        .ok_or_else(|| FmtError::Internal("could not locate expression wrapper end".into()))?;
+    Ok(&formatted[start..end])
+}
+
+// prettyplease uses four spaces per level. Translate indentation to the
+// requested tab width when embedding the result in the view printer.
+fn reindent(body: &str, from: usize, to: usize, tab_spaces: usize) -> String {
+    // Leading whitespace inside a multiline literal is data, not indentation.
+    fn literals(tokens: TokenStream, ranges: &mut Vec<std::ops::Range<usize>>) {
+        for token in tokens {
+            match token {
+                TokenTree::Literal(lit) => ranges.push(lit.span().byte_range()),
+                TokenTree::Group(group) => literals(group.stream(), ranges),
+                _ => {}
+            }
         }
     }
-    out_lines.join("\n")
+    let mut ranges = Vec::new();
+    if let Ok(tokens) = body.parse() {
+        literals(tokens, &mut ranges);
+    }
+    let mut offset = 0;
+    body.split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let start = offset;
+            offset += line.len() + 1;
+            let preceding = ranges.partition_point(|range| range.start < start);
+            if i == 0 || (preceding > 0 && start < ranges[preceding - 1].end) {
+                return line.to_string();
+            }
+            if line.trim().is_empty() {
+                return String::new();
+            }
+            let spaces = line.bytes().take_while(|b| *b == b' ').count();
+            let relative = spaces.saturating_sub(from);
+            let translated = (relative / 4) * tab_spaces + relative % 4;
+            format!("{}{}", " ".repeat(to + translated), &line[spaces..])
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

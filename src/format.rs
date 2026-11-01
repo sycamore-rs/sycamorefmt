@@ -1,8 +1,5 @@
-//! The core formatting pipeline: run `rustfmt` over the whole input first
-//! (so surrounding code and the indentation of each `view!` call site is
-//! canonical), then locate every `view! { ... }` invocation, parse its body
-//! with `sycamore-view-parser`, pretty-print it, and splice the result back
-//! in place of the original tokens.
+//! Locate `view!` invocations, pretty-print their parsed bodies, and splice
+//! them into the original source without changing the surrounding Rust.
 
 use syn::MacroDelimiter;
 use syn::visit::Visit;
@@ -21,24 +18,14 @@ pub struct FormatOutcome {
     /// Non-fatal issues encountered while formatting (e.g. a `view!` macro
     /// body that could not be parsed, or that was left untouched because it
     /// appears to contain comments). The overall run still succeeds; these
-    /// spots are simply left as rustfmt produced them.
+    /// spots are simply left as they appeared in the input.
     pub warnings: Vec<String>,
 }
 
-/// Formats `input`, a complete, syntactically valid Rust source file (or a
-/// self-contained snippet such as a single wrapped function -- see
-/// [`crate::exprfmt`]).
+/// Formats view macros in a complete, syntactically valid Rust source file.
+/// Source outside those macros is left unchanged.
 pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtError> {
-    // Step 1: run rustfmt over the whole file first. `rustfmt` cannot make
-    // sense of the view-macro grammar inside `view! { ... }` bodies, so it
-    // leaves their contents byte-for-byte untouched, but it *does* correctly
-    // format and indent everything else, including the line the macro call
-    // itself sits on. Doing this first means we can trust that line's
-    // indentation when we go decide how to indent the view! body we
-    // generate.
-    let stage1 = crate::rustfmt::run(input, cfg)?;
-
-    let file = syn::parse_file(&stage1).map_err(FmtError::Parse)?;
+    let file = syn::parse_file(input).map_err(FmtError::Parse)?;
     let mut finder = MacroFinder::new();
     finder.visit_file(&file);
 
@@ -46,7 +33,7 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
 
     for found in &finder.found {
-        match splice_one(&stage1, found, cfg) {
+        match splice_one(input, found, cfg) {
             Ok(Some(edit)) => edits.push(edit),
             Ok(None) => {}
             Err(msg) => warnings.push(msg),
@@ -54,7 +41,7 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     }
 
     edits.sort_by_key(|(start, _, _)| *start);
-    let output = apply_edits(&stage1, &edits);
+    let output = apply_edits(input, &edits);
     let changed = output != input;
 
     Ok(FormatOutcome {
@@ -115,8 +102,23 @@ fn splice_one(
         ));
     }
 
+    let path_end = mac
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| format!("skipping a `{macro_name}!` macro: it has an empty path"))?
+        .ident
+        .span()
+        .byte_range()
+        .end;
+    if path_end > open_end {
+        return Err(format!(
+            "skipping a `{macro_name}!` macro: could not determine its source span"
+        ));
+    }
+
     let raw_body = &src[open_end..close_start];
-    if contains_comments(raw_body) {
+    if contains_comments(raw_body) || contains_comments(&src[path_end..open_end]) {
         return Err(format!(
             "skipping a `{macro_name}!` macro: its body appears to contain comments, which \
              sycamorefmt does not support preserving yet"
@@ -131,16 +133,6 @@ fn splice_one(
             ));
         }
     };
-
-    let path_end = mac
-        .path
-        .segments
-        .last()
-        .ok_or_else(|| format!("skipping a `{macro_name}!` macro: it has an empty path"))?
-        .ident
-        .span()
-        .byte_range()
-        .end;
 
     let indent = line_indent(src, path_end);
     let body_indent = indent + cfg.tab_spaces;
