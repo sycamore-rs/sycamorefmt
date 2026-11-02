@@ -27,6 +27,15 @@ pub struct FormatOutcome {
 /// Source outside those macros is left unchanged.
 pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtError> {
     let file = syn::parse_file(input).map_err(FmtError::Parse)?;
+    // syn strips the BOM and shebang before tokenizing, so its byte spans are
+    // relative to this suffix, not to the original input. Use syn's detected
+    // shebang rather than reimplementing its distinction from inner attributes.
+    // The shebang excludes its terminating newline, which syn leaves in place.
+    let mut parsed_input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if let Some(shebang) = &file.shebang {
+        parsed_input = &parsed_input[shebang.len()..];
+    }
+    let source_offset = input.len() - parsed_input.len();
     let mut finder = MacroFinder::new();
     finder.visit_file(&file);
 
@@ -36,8 +45,10 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     let newline = source_newline(input);
 
     for found in &finder.found {
-        match splice_one(input, found, cfg, newline) {
-            Ok(Some(edit)) => edits.push(edit),
+        match splice_one(parsed_input, found, cfg, newline) {
+            Ok(Some((start, end, replacement))) => {
+                edits.push((start + source_offset, end + source_offset, replacement));
+            }
             Ok(None) => {}
             Err(msg) => warnings.push(msg),
         }
