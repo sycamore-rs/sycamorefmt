@@ -8,6 +8,12 @@
 /// Lifetimes are not character literals. Prefixes require a token boundary so
 /// a suffix of an identifier cannot be mistaken for a raw-string prefix.
 pub(crate) fn literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let end = literal_end_inner(bytes, start);
+    debug_assert!(end.is_none_or(|end| end > start && end <= bytes.len()));
+    end
+}
+
+fn literal_end_inner(bytes: &[u8], start: usize) -> Option<usize> {
     let byte = *bytes.get(start)?;
     if byte == b'\'' {
         return char_literal_end(bytes, start);
@@ -109,6 +115,10 @@ fn char_literal_end(bytes: &[u8], quote: usize) -> Option<usize> {
 
 /// Skip a nested Rust block comment starting at `start`.
 pub(crate) fn block_comment_end(bytes: &[u8], start: usize) -> usize {
+    debug_assert_eq!(
+        bytes.get(start..start.saturating_add(2)),
+        Some(b"/*".as_slice())
+    );
     let mut depth = 1usize;
     let mut cursor = start + 2;
     while cursor < bytes.len() && depth > 0 {
@@ -122,12 +132,30 @@ pub(crate) fn block_comment_end(bytes: &[u8], start: usize) -> usize {
             cursor += 1;
         }
     }
+    debug_assert!(
+        start < cursor && cursor <= bytes.len(),
+        "comment scanner must advance within its input"
+    );
     cursor
 }
 
 #[cfg(test)]
 mod tests {
-    use super::literal_end;
+    use super::{block_comment_end, literal_end};
+
+    #[test]
+    fn literal_end_rejects_out_of_bounds_start() {
+        assert_eq!(literal_end(b"\"text\"", 6), None);
+        assert_eq!(literal_end(b"", 0), None);
+    }
+
+    #[test]
+    fn skips_closed_and_unterminated_block_comments() {
+        let comment = b"/* outer /* nested */ done */";
+        let source = [comment.as_slice(), b"x"].concat();
+        assert_eq!(block_comment_end(&source, 0), comment.len());
+        assert_eq!(block_comment_end(b"/* unfinished", 0), 13);
+    }
 
     #[test]
     fn distinguishes_characters_and_lifetimes() {

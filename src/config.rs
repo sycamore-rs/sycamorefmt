@@ -1,5 +1,7 @@
 //! Formatting configuration shared across the CLI and the formatting pipeline.
 
+use crate::error::FmtError;
+
 /// Configuration controlling how `sycamorefmt` formats a piece of Rust source.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -12,6 +14,19 @@ pub struct Config {
     pub edition: String,
     /// Number of spaces per indentation level.
     pub tab_spaces: usize,
+}
+
+/// Allocate indentation without turning an unrepresentable public configuration
+/// (or an allocation failure reported by the allocator) into a capacity panic.
+/// This is not a resource limit: huge allocations may still exhaust OS memory.
+pub(crate) fn indent_padding(width: usize) -> Result<String, FmtError> {
+    let mut padding = String::new();
+    padding.try_reserve_exact(width).map_err(|error| {
+        FmtError::Internal(format!("could not allocate indentation padding: {error}"))
+    })?;
+    padding.extend(std::iter::repeat_n(' ', width));
+    debug_assert_eq!(padding.len(), width);
+    Ok(padding)
 }
 
 impl Default for Config {

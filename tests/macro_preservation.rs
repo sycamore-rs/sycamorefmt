@@ -180,6 +180,59 @@ fn main() {
 }
 
 #[test]
+fn preserves_unicode_opaque_macro_names_and_layout() {
+    for name in [
+        "éview",
+        "r#éview",
+        "module::éview",
+        "módulo::r#éview",
+        "e\u{301}view",
+        "viewé",
+        "r#viewé",
+    ] {
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            let call =
+                format!("{name}!{open}\r\n\t a+b,\n  view!{{span{{\"opaque\"}}}}\r\n{close}");
+            let input = format!("fn render() {{\r\n\tview!{{div{{({call})}}}}\r\n}}\r\n");
+            let output = formatted(&input);
+            assert!(
+                output.contains(&call),
+                "opaque call changed: {call:?}\n{output}"
+            );
+            assert!(
+                output.contains("\tview! {\r\n"),
+                "outer view was not formatted:\n{output}"
+            );
+            assert_eq!(formatted(&output), output, "formatting was not idempotent");
+        }
+    }
+}
+
+#[test]
+fn preserves_unicode_macro_stringify_semantics() {
+    let input = r#"macro_rules! view {
+    (div { ($expression:expr) }) => { $expression };
+}
+macro_rules! éview {
+    ($($tokens:tt)*) => { stringify!($($tokens)*) };
+}
+fn main() {
+    let value = view!{div{(éview!(a+b))}};
+    print!("{}", value);
+}
+"#;
+    let output = formatted(input);
+    let original_value = rustc_stdout(input, "unicode_original");
+    assert_eq!(original_value, "a+b");
+    assert_eq!(
+        rustc_stdout(&output, "unicode_formatted"),
+        original_value,
+        "formatting changed the runtime value of a Unicode opaque macro"
+    );
+    assert!(output.contains("éview!(a+b)"), "{output}");
+}
+
+#[test]
 fn skips_a_view_when_an_opaque_macro_occurs_in_a_pattern() {
     let input = r#"fn render(value: u8) -> View {
     view! {

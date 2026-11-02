@@ -4,7 +4,7 @@
 use syn::MacroDelimiter;
 use syn::visit::Visit;
 
-use crate::config::Config;
+use crate::config::{Config, indent_padding};
 use crate::error::FmtError;
 use crate::finder::{FoundMacro, MacroFinder};
 use crate::lex::{block_comment_end, literal_end};
@@ -33,7 +33,9 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     // The shebang excludes its terminating newline, which syn leaves in place.
     let mut parsed_input = input.strip_prefix('\u{feff}').unwrap_or(input);
     if let Some(shebang) = &file.shebang {
-        parsed_input = &parsed_input[shebang.len()..];
+        parsed_input = parsed_input.strip_prefix(shebang).ok_or_else(|| {
+            FmtError::Internal("parser shebang does not match the source prefix".into())
+        })?;
     }
     let source_offset = input.len() - parsed_input.len();
     let mut finder = MacroFinder::new();
@@ -47,7 +49,15 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     for found in &finder.found {
         match splice_one(parsed_input, found, cfg, newline) {
             Ok(Some((start, end, replacement))) => {
-                edits.push((start + source_offset, end + source_offset, replacement));
+                let start = start.checked_add(source_offset).ok_or_else(|| {
+                    FmtError::Internal(
+                        "source edit start overflowed during span translation".into(),
+                    )
+                })?;
+                let end = end.checked_add(source_offset).ok_or_else(|| {
+                    FmtError::Internal("source edit end overflowed during span translation".into())
+                })?;
+                edits.push((start, end, replacement));
             }
             Ok(None) => {}
             Err(msg) => warnings.push(msg),
@@ -55,8 +65,12 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     }
 
     edits.sort_by_key(|(start, _, _)| *start);
-    let output = apply_edits(input, &edits);
+    let output = apply_edits(input, &edits)?;
     let changed = output != input;
+    debug_assert!(
+        !changed || syn::parse_file(&output).is_ok(),
+        "formatter produced invalid Rust source"
+    );
 
     Ok(FormatOutcome {
         output,
@@ -65,24 +79,28 @@ pub fn format_source(input: &str, cfg: &Config) -> Result<FormatOutcome, FmtErro
     })
 }
 
-/// Splices non-overlapping `(start, end, replacement)` edits (byte offsets
-/// into `src`, in any order) into a new string.
-fn apply_edits(src: &str, edits: &[(usize, usize, String)]) -> String {
+/// Splices sorted, non-overlapping `(start, end, replacement)` edits (byte
+/// offsets into `src`). Reject invalid edits rather than silently omitting one
+/// or slicing at a bogus offset. The caller can then leave the file unchanged.
+fn apply_edits(src: &str, edits: &[(usize, usize, String)]) -> Result<String, FmtError> {
     let mut output = String::with_capacity(src.len());
     let mut last = 0usize;
     for (start, end, text) in edits {
-        if *start < last {
-            // Overlapping edits should be impossible (macro invocations
-            // can't overlap), but guard against it defensively rather than
-            // panicking or corrupting output.
-            continue;
+        if *start < last || src.get(*start..*end).is_none() {
+            return Err(FmtError::Internal(
+                "source edits are overlapping, unsorted, or have an invalid byte range".into(),
+            ));
         }
+        debug_assert!(
+            src.is_char_boundary(last),
+            "previous edit ended inside UTF-8"
+        );
         output.push_str(&src[last..*start]);
         output.push_str(text);
         last = *end;
     }
     output.push_str(&src[last..]);
-    output
+    Ok(output)
 }
 
 /// Computes the replacement text for one `view!`-like macro invocation, or
@@ -111,32 +129,44 @@ fn splice_one(
     let close_range = delim_span.close().byte_range();
 
     let (open_end, close_start, close_end) = (open_range.end, close_range.start, close_range.end);
-    if open_end > src.len() || close_end > src.len() || open_end > close_start {
+    if src.get(open_range.clone()) != Some("{")
+        || src.get(close_range.clone()) != Some("}")
+        || open_end > close_start
+    {
         return Err(format!(
             "skipping a `{macro_name}!` macro: could not determine its source span"
         ));
     }
 
-    let path_end = mac
+    let path_range = mac
         .path
         .segments
         .last()
         .ok_or_else(|| format!("skipping a `{macro_name}!` macro: it has an empty path"))?
         .ident
         .span()
-        .byte_range()
-        .end;
-    if path_end > open_end {
+        .byte_range();
+    let path_end = path_range.end;
+    if path_range.is_empty() || src.get(path_range).is_none() || path_end > open_range.start {
         return Err(format!(
             "skipping a `{macro_name}!` macro: could not determine its source span"
         ));
     }
 
+    // All slice endpoints above are checked against the parser's source
+    // coordinate system, including UTF-8 boundaries and actual delimiter bytes.
     let raw_body = &src[open_end..close_start];
-    if contains_comments(raw_body) || contains_comments(&src[path_end..open_end]) {
+    let header = &src[path_end..open_range.start];
+    if contains_comments(raw_body) || contains_comments(header) {
         return Err(format!(
             "skipping a `{macro_name}!` macro: its body appears to contain comments, which \
              sycamorefmt does not support preserving yet"
+        ));
+    }
+
+    if header.trim() != "!" {
+        return Err(format!(
+            "skipping a `{macro_name}!` macro: source span does not point to a macro invocation"
         ));
     }
 
@@ -150,9 +180,14 @@ fn splice_one(
     };
 
     let prefix = line_indent_prefix(src, path_end);
-    let indent = visual_indent(&prefix, cfg.tab_spaces);
-    let body_indent = indent + cfg.tab_spaces;
-    let pad = " ".repeat(indent);
+    let indent = visual_indent(&prefix, cfg.tab_spaces).ok_or_else(|| {
+        format!("skipping a `{macro_name}!` macro: source indentation overflowed")
+    })?;
+    let body_indent = indent
+        .checked_add(cfg.tab_spaces)
+        .ok_or_else(|| format!("skipping a `{macro_name}!` macro: body indentation overflowed"))?;
+    let pad =
+        indent_padding(indent).map_err(|e| format!("skipping a `{macro_name}!` macro: {e}"))?;
 
     let spacing = crate::trivia::SpacingRoot::try_from_root(&root, raw_body).ok_or_else(|| {
         format!("skipping a `{macro_name}!` macro: could not safely recover source trivia")
@@ -195,6 +230,10 @@ fn contains_comments(src: &str) -> bool {
 
 /// Returns the exact leading spaces/tabs on the line containing `pos`.
 fn line_indent_prefix(src: &str, pos: usize) -> String {
+    debug_assert!(
+        src.is_char_boundary(pos),
+        "indent position must be a valid source offset"
+    );
     let line_start = src[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
     src[line_start..pos]
         .chars()
@@ -203,11 +242,15 @@ fn line_indent_prefix(src: &str, pos: usize) -> String {
 }
 
 /// Measures indentation using `tab_spaces` as the width of a tab stop.
-fn visual_indent(prefix: &str, tab_spaces: usize) -> usize {
+fn visual_indent(prefix: &str, tab_spaces: usize) -> Option<usize> {
+    debug_assert!(prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')));
     let tab_width = tab_spaces.max(1);
-    prefix.chars().fold(0, |column, ch| match ch {
-        '\t' => column + tab_width - column % tab_width,
-        _ => column + 1,
+    prefix.chars().try_fold(0usize, |column, ch| {
+        column.checked_add(if ch == '\t' {
+            tab_width - column % tab_width
+        } else {
+            1
+        })
     })
 }
 
@@ -215,6 +258,8 @@ fn visual_indent(prefix: &str, tab_spaces: usize) -> usize {
 /// newline convention. Rust literal tokens are copied byte-for-byte, including
 /// any physical newlines they contain.
 fn restore_layout(text: &str, prefix: &str, base_indent: usize, newline: &str) -> String {
+    debug_assert!(prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')));
+    debug_assert!(matches!(newline, "\n" | "\r\n"));
     let bytes = text.as_bytes();
     let opaque_macros = macro_invocation_ranges(text);
     let mut macro_index = 0;
@@ -223,6 +268,16 @@ fn restore_layout(text: &str, prefix: &str, base_indent: usize, newline: &str) -
     let mut at_line_start = false;
 
     while i < bytes.len() {
+        debug_assert!(
+            text.is_char_boundary(i),
+            "layout cursor must stay on UTF-8 boundaries"
+        );
+        debug_assert!(
+            opaque_macros
+                .get(macro_index)
+                .is_none_or(|(start, _)| *start >= i),
+            "layout conversion skipped an opaque macro"
+        );
         if let Some((start, end)) = opaque_macros.get(macro_index).copied()
             && i == start
         {
@@ -277,6 +332,11 @@ fn restore_layout(text: &str, prefix: &str, base_indent: usize, newline: &str) -
         i += ch.len_utf8();
     }
 
+    debug_assert_eq!(
+        macro_index,
+        opaque_macros.len(),
+        "not all opaque macros were preserved"
+    );
     output
 }
 
@@ -325,6 +385,14 @@ fn macro_invocation_ranges(src: &str) -> Vec<(usize, usize)> {
             if matches!(bytes.get(open), Some(b'(' | b'[' | b'{'))
                 && let Some(end) = delimiter_group_end(bytes, open)
             {
+                debug_assert!(start <= i && i < open && open < end && end <= src.len());
+                debug_assert!(src.is_char_boundary(start) && src.is_char_boundary(end));
+                debug_assert!(
+                    ranges
+                        .last()
+                        .is_none_or(|(_, previous_end)| *previous_end <= start),
+                    "opaque macro ranges must be ordered and non-overlapping"
+                );
                 ranges.push((start, end));
                 i = end;
                 continue;
@@ -359,6 +427,8 @@ fn restore_opaque_macro_calls(emitted: &str, original: &str) -> Option<String> {
     for ((source_start, source_end), (output_start, output_end)) in
         original_ranges.iter().zip(&emitted_ranges).rev()
     {
+        // Replacing in reverse order must leave every earlier byte offset intact.
+        debug_assert!(output.get(*output_start..*output_end).is_some());
         output.replace_range(
             *output_start..*output_end,
             &original[*source_start..*source_end],
@@ -386,6 +456,7 @@ fn macro_identity(source: &str) -> Option<(String, Option<String>, u8)> {
 /// Returns the start of the macro path preceding `!`, falling back to the
 /// delimiter group for unusual paths that cannot be scanned simply.
 fn macro_call_start(bytes: &[u8], bang: usize) -> usize {
+    debug_assert_eq!(bytes.get(bang), Some(&b'!'), "expected a macro bang");
     let mut end = bang;
     while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
         end -= 1;
@@ -441,6 +512,7 @@ fn macro_call_start(bytes: &[u8], bang: usize) -> usize {
 
 /// Returns whether `!` is preceded by a macro path rather than unary `!`.
 fn macro_path_precedes(bytes: &[u8], bang: usize) -> bool {
+    debug_assert_eq!(bytes.get(bang), Some(&b'!'), "expected a macro bang");
     let mut end = bang;
     while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
         end -= 1;
@@ -470,12 +542,19 @@ fn macro_path_precedes(bytes: &[u8], bang: usize) -> bool {
 /// must receive the enclosing indentation conversion rather than opaque-token
 /// treatment.
 fn is_view_macro(bytes: &[u8], bang: usize) -> bool {
+    debug_assert_eq!(bytes.get(bang), Some(&b'!'), "expected a macro bang");
     let mut end = bang;
     while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
         end -= 1;
     }
     let mut start = end;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+    // Include all UTF-8 bytes, as the other macro-path scanners do. Otherwise
+    // an opaque identifier such as `éview` would be mistaken for `view`.
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric()
+            || bytes[start - 1] == b'_'
+            || bytes[start - 1] >= 0x80)
+    {
         start -= 1;
     }
     let name = if start >= 2 && bytes.get(start - 2..start) == Some(b"r#") {
@@ -488,7 +567,7 @@ fn is_view_macro(bytes: &[u8], bang: usize) -> bool {
 
 /// Finds the byte immediately following a balanced delimiter group.
 fn delimiter_group_end(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut stack = vec![match bytes[open] {
+    let mut stack = vec![match *bytes.get(open)? {
         b'(' => b')',
         b'[' => b']',
         b'{' => b'}',
@@ -520,6 +599,7 @@ fn delimiter_group_end(bytes: &[u8], open: usize) -> Option<usize> {
                     return Some(i + 1);
                 }
             }
+            b')' | b']' | b'}' => return None,
             _ => {}
         }
         i += 1;
@@ -589,7 +669,85 @@ fn source_newline(src: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::contains_comments;
+    use super::*;
+
+    #[test]
+    fn edits_reject_invalid_ranges_and_ordering() {
+        let src = "aébc";
+        for ranges in [
+            vec![(3, 2)],             // reversed
+            vec![(0, src.len() + 1)], // out of bounds
+            vec![(2, 3)],             // starts inside UTF-8
+            vec![(0, 2)],             // ends inside UTF-8
+            vec![(0, 3), (1, 4)],     // overlapping
+            vec![(3, 4), (0, 1)],     // unsorted
+        ] {
+            let edits = ranges
+                .into_iter()
+                .map(|(start, end)| (start, end, "x".into()))
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                apply_edits(src, &edits),
+                Err(FmtError::Internal(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn edits_allow_adjacent_unicode_ranges_and_insertions() {
+        let edits = vec![(0, 1, "A".into()), (1, 3, "É".into()), (3, 3, "!".into())];
+        assert_eq!(apply_edits("aébc", &edits).unwrap(), "AÉ!bc");
+        assert_eq!(apply_edits("aébc", &[]).unwrap(), "aébc");
+    }
+
+    #[test]
+    fn mismatched_macro_spans_fail_closed() {
+        let file = syn::parse_file("fn main(){view!{div{}}}").unwrap();
+        let mut finder = MacroFinder::new();
+        finder.visit_file(&file);
+        for src in ["é", "fn main(){view!(div())}", "fn main(){view?{div{}}}"] {
+            assert!(splice_one(src, &finder.found[0], &Config::default(), "\n").is_err());
+        }
+    }
+
+    #[test]
+    fn delimiter_scanning_rejects_mismatched_or_missing_groups() {
+        for src in ["(])", "([)]", "(", ""] {
+            assert_eq!(delimiter_group_end(src.as_bytes(), 0), None, "{src:?}");
+        }
+        assert_eq!(delimiter_group_end(b"([])", 0), Some(4));
+    }
+
+    #[test]
+    fn indentation_overflow_leaves_the_view_unchanged() {
+        let cfg = Config {
+            tab_spaces: usize::MAX,
+            ..Config::default()
+        };
+        let input = "fn main() {\n\t\tview!{div{}}\n}\n";
+        let outcome = format_source(input, &cfg).unwrap();
+        assert_eq!(outcome.output, input);
+        assert!(!outcome.changed);
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("indentation overflowed"));
+        assert_eq!(visual_indent("\t", 0), Some(1));
+    }
+
+    #[test]
+    fn unrepresentable_padding_leaves_text_views_unchanged() {
+        let cfg = Config {
+            tab_spaces: usize::MAX,
+            ..Config::default()
+        };
+        let input = "fn main() { view!{\"text\"} }\n";
+        let outcome = format_source(input, &cfg).unwrap();
+        assert_eq!(outcome.output, input);
+        assert!(!outcome.changed);
+        assert_eq!(outcome.warnings.len(), 1);
+        assert!(outcome.warnings[0].contains("could not allocate indentation padding"));
+        assert_eq!(indent_padding(0).unwrap(), "");
+        assert_eq!(indent_padding(3).unwrap(), "   ");
+    }
 
     #[test]
     fn comment_detection_ignores_string_contents() {

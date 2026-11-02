@@ -9,6 +9,7 @@
 use sycamore_view_parser::ir::{IfNode, MatchNode, Node, Root, TagNode};
 use syn::parse::Parser;
 
+use crate::error::FmtError;
 use crate::lex::{block_comment_end, literal_end};
 
 /// Trivia associated with a parsed `Root`.
@@ -43,10 +44,13 @@ impl SpacingRoot {
     /// and IR cannot be walked in lockstep.
     pub(crate) fn try_from_root(root: &Root, source: &str) -> Option<Self> {
         if root.0.is_empty() {
-            return Some(Self::empty());
+            return (skip_whitespace(source, 0, source.len()) == source.len()).then(Self::empty);
         }
         let delimiters = DelimiterMap::new(source);
-        scan_root(root, source, &delimiters, 0, source.len()).map(|(_, spacing)| spacing)
+        let (end, spacing) = scan_root(root, source, &delimiters, 0, source.len())?;
+        // A partial walk is not enough: unmatched trailing source must never
+        // disappear just because the IR/scanner coordinate systems disagree.
+        (skip_whitespace(source, end, source.len()) == source.len()).then_some(spacing)
     }
 
     fn empty() -> Self {
@@ -56,12 +60,34 @@ impl SpacingRoot {
         }
     }
 
+    pub(crate) fn validate_shape(&self, root: &Root) -> Result<(), FmtError> {
+        if self.nodes.len() != root.0.len() {
+            return Err(FmtError::Internal(format!(
+                "spacing node count ({}) does not match IR root node count ({})",
+                self.nodes.len(),
+                root.0.len()
+            )));
+        }
+        if self.between.len() != root.0.len().saturating_sub(1) {
+            return Err(FmtError::Internal(format!(
+                "spacing gap count ({}) does not match IR root node count ({})",
+                self.between.len(),
+                root.0.len()
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn node(&self, index: usize) -> &SpacingNode {
         debug_assert!(index < self.nodes.len());
         &self.nodes[index]
     }
 
     pub(crate) fn has_blank_line_between(&self, index: usize) -> bool {
+        debug_assert!(
+            index < self.between.len(),
+            "spacing gap index must match the IR"
+        );
         self.between.get(index).copied().unwrap_or(false)
     }
 
@@ -80,6 +106,7 @@ fn scan_root(
     start: usize,
     limit: usize,
 ) -> Option<(usize, SpacingRoot)> {
+    debug_assert!(start <= limit && limit <= source.len());
     let mut cursor = start;
     let mut previous_end = None;
     let mut between = Vec::with_capacity(root.0.len().saturating_sub(1));
@@ -96,13 +123,17 @@ fn scan_root(
             return None;
         }
         if let Some(previous_end) = previous_end {
+            debug_assert!(previous_end <= node_start);
             between.push(contains_empty_line(&source[previous_end..node_start]));
         }
         previous_end = Some(node_end);
         cursor = node_end;
         nodes.push(spacing_node);
+        debug_assert!(cursor > node_start && cursor <= limit);
     }
 
+    debug_assert_eq!(nodes.len(), root.0.len());
+    debug_assert_eq!(between.len(), root.0.len().saturating_sub(1));
     Some((cursor, SpacingRoot { between, nodes }))
 }
 
@@ -333,6 +364,7 @@ fn scan_match_arms(
     let mut cursor = skip_whitespace(source, start, close);
     let mut arms = Vec::with_capacity(match_node.arms.len());
 
+    debug_assert!(start <= close && close <= source.len());
     for arm in &match_node.arms {
         let arrow = find_fat_arrow(source, delimiters, cursor, close)?;
         cursor = skip_whitespace(source, arrow + 2, close);
@@ -372,6 +404,7 @@ fn scan_match_arms(
         cursor = skip_whitespace(source, cursor, close);
     }
 
+    debug_assert_eq!(arms.len(), match_node.arms.len());
     (cursor == close).then_some(arms)
 }
 
@@ -385,6 +418,7 @@ fn next_top_level_brace(
     limit: usize,
 ) -> Option<Option<usize>> {
     let bytes = source.as_bytes();
+    debug_assert!(*cursor <= limit && limit <= bytes.len());
     while *cursor < limit {
         if let Some(end) = skip_non_code(source, *cursor, limit) {
             *cursor = end;
@@ -409,6 +443,7 @@ fn next_top_level_brace(
             }
             _ => *cursor += 1,
         }
+        debug_assert!(*cursor <= limit);
     }
     Some(None)
 }
@@ -420,6 +455,7 @@ fn find_fat_arrow(
     limit: usize,
 ) -> Option<usize> {
     let bytes = source.as_bytes();
+    debug_assert!(cursor <= limit && limit <= bytes.len());
     while cursor + 1 < limit {
         if let Some(end) = skip_non_code(source, cursor, limit) {
             cursor = end;
@@ -436,29 +472,34 @@ fn find_fat_arrow(
             b'=' if bytes[cursor + 1] == b'>' => return Some(cursor),
             _ => cursor += 1,
         }
+        debug_assert!(cursor <= limit);
     }
     None
 }
 
 /// Skip a comment or literal using the shared source lexer.
 fn skip_non_code(source: &str, cursor: usize, limit: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
+    debug_assert!(limit <= source.len());
+    let bytes = &source.as_bytes()[..limit];
     if cursor >= limit {
         return None;
     }
-    if bytes.get(cursor..cursor + 2) == Some(b"//") {
-        return Some(
-            bytes[cursor..limit]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map(|offset| cursor + offset + 1)
-                .unwrap_or(limit),
-        );
-    }
-    if bytes.get(cursor..cursor + 2) == Some(b"/*") {
-        return Some(block_comment_end(&bytes[..limit], cursor));
-    }
-    literal_end(bytes, cursor)
+    let end = if bytes.get(cursor..cursor + 2) == Some(b"//") {
+        bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| cursor + offset + 1)
+            .unwrap_or(limit)
+    } else if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+        block_comment_end(bytes, cursor)
+    } else {
+        literal_end(bytes, cursor)?
+    };
+    debug_assert!(
+        cursor < end && end <= limit,
+        "trivia scanner must advance within its bounds"
+    );
+    Some(end)
 }
 
 fn keyword_at(source: &str, start: usize, limit: usize, keyword: &str) -> bool {
@@ -494,9 +535,11 @@ fn contains_empty_line(gap: &str) -> bool {
 
 fn skip_whitespace(source: &str, mut cursor: usize, limit: usize) -> usize {
     let bytes = source.as_bytes();
+    debug_assert!(cursor <= limit && limit <= bytes.len());
     while cursor < limit && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
+    debug_assert!(cursor <= limit);
     cursor
 }
 
@@ -509,6 +552,7 @@ fn find_next_tag_delimiter(
     let bytes = source.as_bytes();
     let mut cursor = start;
     let mut generic_depth = 0usize;
+    debug_assert!(start <= limit && limit <= bytes.len());
     while cursor < limit {
         if let Some(end) = skip_non_code(source, cursor, limit) {
             cursor = end;
@@ -532,11 +576,13 @@ fn find_next_tag_delimiter(
             _ => {}
         }
         cursor += 1;
+        debug_assert!(cursor <= limit);
     }
     None
 }
 
 fn next_non_whitespace(source: &str, start: usize, limit: usize) -> Option<usize> {
+    debug_assert!(start <= limit && limit <= source.len());
     source.as_bytes()[start..limit]
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
@@ -557,7 +603,7 @@ impl DelimiterMap {
 
         while cursor < bytes.len() {
             if let Some(end) = skip_non_code(source, cursor, bytes.len()) {
-                cursor = end.max(cursor + 1);
+                cursor = end;
                 continue;
             }
             match bytes[cursor] {
@@ -578,13 +624,23 @@ impl DelimiterMap {
             cursor += 1;
         }
 
+        debug_assert!(matching.iter().enumerate().all(|(index, &other)| {
+            other == usize::MAX || (other < matching.len() && matching[other] == index)
+        }));
         Self { matching }
     }
 
     fn matching(&self, open: usize) -> Option<usize> {
         match self.matching.get(open).copied()? {
             usize::MAX => None,
-            close => Some(close),
+            close => {
+                debug_assert!(
+                    open < close,
+                    "delimiter lookup must start at an opening delimiter"
+                );
+                debug_assert_eq!(self.matching[close], open);
+                Some(close)
+            }
         }
     }
 }
@@ -594,10 +650,103 @@ mod tests {
     use sycamore_view_parser::ir::Root;
 
     use super::{ControlSpacing, DelimiterMap, SpacingRoot};
+    use crate::{Config, printer::print_root};
 
     fn spacing(source: &str) -> SpacingRoot {
         let root: Root = syn::parse_str(source).expect("valid view body");
         SpacingRoot::try_from_root(&root, source).expect("source and IR match")
+    }
+
+    #[test]
+    fn printer_rejects_malformed_spacing_root_shapes() {
+        let root: Root = syn::parse_str("first {}\nsecond {}").expect("valid view body");
+        let missing_nodes = SpacingRoot::empty();
+        assert!(print_root(&root, &missing_nodes, 0, &Config::default()).is_err());
+
+        let mut missing_gap = spacing("first {}\nsecond {}");
+        missing_gap.between.clear();
+        assert!(print_root(&root, &missing_gap, 0, &Config::default()).is_err());
+    }
+
+    #[test]
+    fn printer_rejects_missing_control_trivia() {
+        let root: Root = syn::parse_str("if ready { shown {} }").expect("valid view body");
+        let mut malformed = spacing("if ready { shown {} }");
+        malformed.nodes[0].control = ControlSpacing::None;
+        assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
+    }
+
+    #[test]
+    fn printer_rejects_extra_spacing_for_empty_roots_and_tag_children() {
+        let empty: Root = syn::parse_str("").unwrap();
+        assert!(print_root(&empty, &spacing("div {}"), 0, &Config::default()).is_err());
+        let source = "div { span {} }";
+        let root: Root = syn::parse_str(source).unwrap();
+        let mut malformed = spacing(source);
+        malformed.nodes[0].children.nodes.clear();
+        assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
+    }
+
+    #[test]
+    fn printer_rejects_unexpected_control_and_match_arm_counts() {
+        let source = "div {}";
+        let root: Root = syn::parse_str(source).unwrap();
+        let mut malformed = spacing(source);
+        malformed.nodes[0].control = ControlSpacing::Match { arms: Vec::new() };
+        assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
+
+        let source = "match value { _ => {} }";
+        let root: Root = syn::parse_str(source).unwrap();
+        let mut malformed = spacing(source);
+        let ControlSpacing::Match { arms } = &mut malformed.nodes[0].control else {
+            panic!("expected match spacing");
+        };
+        arms.clear();
+        assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
+    }
+
+    #[test]
+    fn printer_rejects_mismatched_else_branch_presence() {
+        for source in ["if ready {}", "if ready {} else {}"] {
+            let root: Root = syn::parse_str(source).unwrap();
+            let mut malformed = spacing(source);
+            let ControlSpacing::If { else_branch, .. } = &mut malformed.nodes[0].control else {
+                panic!("expected if spacing");
+            };
+            *else_branch = if else_branch.is_some() {
+                None
+            } else {
+                Some(SpacingRoot::empty())
+            };
+            assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn source_recovery_rejects_trailing_unmatched_source() {
+        let root: Root = syn::parse_str("div {}").unwrap();
+        assert!(SpacingRoot::try_from_root(&root, "div {} extra {}").is_none());
+        let empty: Root = syn::parse_str("").unwrap();
+        assert!(SpacingRoot::try_from_root(&empty, "div {}").is_none());
+        assert!(SpacingRoot::try_from_root(&empty, " \r\n\t").is_some());
+        assert_eq!(super::skip_non_code("\"text\"", 0, 3), None);
+        assert_eq!(super::skip_non_code("/* text */", 0, 1), None);
+    }
+
+    #[test]
+    fn printer_rejects_malformed_else_if_spacing_before_indexing() {
+        let source = "if ready {} else if next {}";
+        let root: Root = syn::parse_str(source).expect("valid view body");
+        let mut malformed = spacing(source);
+        let ControlSpacing::If {
+            else_branch: Some(else_spacing),
+            ..
+        } = &mut malformed.nodes[0].control
+        else {
+            panic!("expected else-if spacing");
+        };
+        else_spacing.nodes.clear();
+        assert!(print_root(&root, &malformed, 0, &Config::default()).is_err());
     }
 
     #[test]

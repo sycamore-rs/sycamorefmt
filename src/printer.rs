@@ -16,7 +16,7 @@ use sycamore_view_parser::ir::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Config;
+use crate::config::{Config, indent_padding};
 use crate::error::FmtError;
 use crate::exprfmt::{format_expr, format_pattern};
 use crate::trivia::{ControlSpacing, SpacingNode, SpacingRoot};
@@ -30,7 +30,10 @@ pub fn print_root(
     indent: usize,
     cfg: &Config,
 ) -> Result<String, FmtError> {
-    let pad = " ".repeat(indent);
+    spacing.validate_shape(root)?;
+    // Render the first node before allocating root padding, so a deeper
+    // indentation overflow is reported without attempting a huge allocation.
+    let mut pad = String::new();
     let mut output = String::new();
     for (index, node) in root.0.iter().enumerate() {
         if index > 0 {
@@ -41,7 +44,11 @@ pub fn print_root(
             });
         }
         let rendered = print_node(node, spacing.node(index), indent, cfg)?;
-        output.push_str(&format!("{pad}{rendered}"));
+        if index == 0 {
+            pad = indent_padding(indent)?;
+        }
+        output.push_str(&pad);
+        output.push_str(&rendered);
     }
     Ok(output)
 }
@@ -55,11 +62,36 @@ fn print_node(
     cfg: &Config,
 ) -> Result<String, FmtError> {
     match node {
-        Node::Tag(tag) => print_tag(tag, &spacing.children, indent, cfg),
-        Node::Text(text) => Ok(print_text(text)),
-        Node::Dyn(d) => print_dyn(d, indent, cfg),
+        Node::Tag(tag) => {
+            require_no_control_spacing(&spacing.control)?;
+            print_tag(tag, &spacing.children, indent, cfg)
+        }
+        Node::Text(text) => {
+            require_no_control_spacing(&spacing.control)?;
+            Ok(print_text(text))
+        }
+        Node::Dyn(d) => {
+            require_no_control_spacing(&spacing.control)?;
+            print_dyn(d, indent, cfg)
+        }
         Node::If(if_node) => print_if(if_node, spacing, indent, cfg),
         Node::Match(match_node) => print_match(match_node, spacing, indent, cfg),
+    }
+}
+
+fn checked_indent(indent: usize, tab_spaces: usize) -> Result<usize, FmtError> {
+    indent
+        .checked_add(tab_spaces)
+        .ok_or_else(|| FmtError::Internal("printer indentation overflow".into()))
+}
+
+fn require_no_control_spacing(control: &ControlSpacing) -> Result<(), FmtError> {
+    if matches!(control, ControlSpacing::None) {
+        Ok(())
+    } else {
+        Err(FmtError::Internal(
+            "non-control node has control-flow trivia".into(),
+        ))
     }
 }
 
@@ -83,32 +115,35 @@ fn print_if(
     cfg: &Config,
 ) -> Result<String, FmtError> {
     let condition = format_expr(&if_node.cond, indent, cfg)?;
-    let then_spacing = match &spacing.control {
-        ControlSpacing::If { then_branch, .. } => then_branch,
+    let (then_spacing, else_spacing, else_if) = match &spacing.control {
+        ControlSpacing::If {
+            then_branch,
+            else_branch,
+            else_if,
+        } => (then_branch, else_branch.as_ref(), *else_if),
         _ => {
             return Err(FmtError::Internal(
-                "if node is missing branch trivia".into(),
+                "if node has mismatched branch trivia".into(),
             ));
         }
     };
+    if else_spacing.is_some() != if_node.else_branch.is_some() {
+        return Err(FmtError::Internal(
+            "if node and spacing disagree about else branch presence".into(),
+        ));
+    }
+    if else_if && else_spacing.is_none() {
+        return Err(FmtError::Internal(
+            "if node marks a missing else branch as else-if".into(),
+        ));
+    }
     let then_body = print_block(&if_node.then, then_spacing, indent, cfg)?;
     let mut output = format!("if {condition}{then_body}");
 
-    if let Some(else_branch) = &if_node.else_branch {
-        let (else_spacing, else_if) = match &spacing.control {
-            ControlSpacing::If {
-                else_branch: Some(else_branch),
-                else_if,
-                ..
-            } => (else_branch, *else_if),
-            _ => {
-                return Err(FmtError::Internal(
-                    "if node is missing else-branch trivia".into(),
-                ));
-            }
-        };
+    if let (Some(ir_else_branch), Some(else_spacing)) = (&if_node.else_branch, else_spacing) {
+        else_spacing.validate_shape(ir_else_branch)?;
         if else_if {
-            let [Node::If(nested)] = else_branch.0.as_slice() else {
+            let [Node::If(nested)] = ir_else_branch.0.as_slice() else {
                 return Err(FmtError::Internal(
                     "else-if node does not contain exactly one if branch".into(),
                 ));
@@ -118,7 +153,7 @@ fn print_if(
             output.push_str(" else ");
             output.push_str(&rendered);
         } else {
-            let rendered = print_block(else_branch, else_spacing, indent, cfg)?;
+            let rendered = print_block(ir_else_branch, else_spacing, indent, cfg)?;
             output.push_str(" else");
             output.push_str(&rendered);
         }
@@ -142,9 +177,9 @@ fn print_match(
             ));
         }
     };
-    let arm_indent = indent + cfg.tab_spaces;
-    let arm_pad = " ".repeat(arm_indent);
-    let closing_pad = " ".repeat(indent);
+    let arm_indent = checked_indent(indent, cfg.tab_spaces)?;
+    let arm_pad = indent_padding(arm_indent)?;
+    let closing_pad = indent_padding(indent)?;
     let mut arms = Vec::with_capacity(match_node.arms.len());
 
     for (arm, arm_spacing) in match_node.arms.iter().zip(arm_spacings) {
@@ -169,11 +204,12 @@ fn print_block(
     indent: usize,
     cfg: &Config,
 ) -> Result<String, FmtError> {
+    spacing.validate_shape(root)?;
     if root.0.is_empty() {
         Ok(" {}".to_string())
     } else {
-        let body = print_root(root, spacing, indent + cfg.tab_spaces, cfg)?;
-        Ok(format!(" {{\n{body}\n{}}}", " ".repeat(indent)))
+        let body = print_root(root, spacing, checked_indent(indent, cfg.tab_spaces)?, cfg)?;
+        Ok(format!(" {{\n{body}\n{}}}", indent_padding(indent)?))
     }
 }
 
@@ -207,10 +243,11 @@ fn print_tag(
     indent: usize,
     cfg: &Config,
 ) -> Result<String, FmtError> {
+    spacing.validate_shape(&tag.children)?;
+    let inner_indent = checked_indent(indent, cfg.tab_spaces)?;
     let head = tag_ident_str(&tag.ident);
-    let inner_indent = indent + cfg.tab_spaces;
-    let pad = " ".repeat(indent);
-    let inner_pad = " ".repeat(inner_indent);
+    let pad = indent_padding(indent)?;
+    let inner_pad = indent_padding(inner_indent)?;
 
     let has_props = !tag.props.is_empty();
     let has_children = !tag.children.0.is_empty();
@@ -334,9 +371,11 @@ fn display_column_after(mut column: usize, text: &str, tab_spaces: usize) -> usi
     let tab_width = tab_spaces.max(1);
     for (index, segment) in text.split('\t').enumerate() {
         if index > 0 {
-            column += tab_width - column % tab_width;
+            column = column.saturating_add(tab_width - column % tab_width);
         }
-        column += UnicodeWidthStr::width(segment);
+        // Treat an unrepresentable width as usize::MAX rather than wrapping
+        // around and making an over-wide line appear short.
+        column = column.saturating_add(UnicodeWidthStr::width(segment));
     }
     column
 }
@@ -383,5 +422,26 @@ fn tag_ident_str(ident: &TagIdent) -> String {
             output
         }
         TagIdent::Hyphenated(s) => s.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_column_after, print_root};
+    use crate::{Config, trivia::SpacingRoot};
+    use sycamore_view_parser::ir::Root;
+
+    #[test]
+    fn display_column_saturates_for_tabs_and_wide_text() {
+        assert_eq!(display_column_after(usize::MAX, "\t", 4), usize::MAX);
+        assert_eq!(display_column_after(usize::MAX, "x", 4), usize::MAX);
+    }
+
+    #[test]
+    fn root_checks_nested_indent_before_allocating_padding() {
+        let source = "div {}";
+        let root: Root = syn::parse_str(source).expect("valid view body");
+        let spacing = SpacingRoot::try_from_root(&root, source).expect("matching trivia");
+        assert!(print_root(&root, &spacing, usize::MAX, &Config::default()).is_err());
     }
 }

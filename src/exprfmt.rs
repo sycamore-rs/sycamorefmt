@@ -11,7 +11,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{Expr, Item, ItemFn, Pat, Stmt, Visibility};
 
-use crate::config::Config;
+use crate::config::{Config, indent_padding};
 use crate::error::FmtError;
 
 pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, FmtError> {
@@ -63,7 +63,7 @@ pub fn format_expr(expr: &Expr, indent: usize, cfg: &Config) -> Result<String, F
     let (open, close) = delimiter_ranges(paren.paren_token.span);
     let outer = expr.span().byte_range();
     let inner = checked_inner_range(&formatted, outer, open, close, "expression wrapper")?;
-    Ok(reindent(inner.trim(), 4, indent, cfg.tab_spaces))
+    reindent(inner.trim(), 4, indent, cfg.tab_spaces)
 }
 
 pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<String, FmtError> {
@@ -126,7 +126,7 @@ pub fn format_pattern(pattern: &Pat, indent: usize, cfg: &Config) -> Result<Stri
             "formatted match pattern span does not match its syntax tree".into(),
         ));
     }
-    Ok(reindent(pattern, 8, indent, cfg.tab_spaces))
+    reindent(pattern, 8, indent, cfg.tab_spaces)
 }
 
 // Pattern macros can have grammar and expansion behavior unknown to syn.
@@ -298,7 +298,7 @@ fn checked_contained_range<'a>(
 
 // prettyplease uses four spaces per level. Translate indentation to the
 // requested tab width when embedding the result in the view printer.
-fn reindent(body: &str, from: usize, to: usize, tab_spaces: usize) -> String {
+fn reindent(body: &str, from: usize, to: usize, tab_spaces: usize) -> Result<String, FmtError> {
     // Leading whitespace inside a multiline literal is data, not indentation.
     fn literals(tokens: TokenStream, ranges: &mut Vec<std::ops::Range<usize>>) {
         for token in tokens {
@@ -313,24 +313,121 @@ fn reindent(body: &str, from: usize, to: usize, tab_spaces: usize) -> String {
     if let Ok(tokens) = body.parse() {
         literals(tokens, &mut ranges);
     }
+    debug_assert!(ranges.iter().all(|range| {
+        range.start <= range.end
+            && range.end <= body.len()
+            && body.is_char_boundary(range.start)
+            && body.is_char_boundary(range.end)
+    }));
+    debug_assert!(ranges.windows(2).all(|pair| pair[0].end <= pair[1].start));
+
     let mut offset = 0;
-    body.split('\n')
-        .enumerate()
-        .map(|(i, line)| {
-            let start = offset;
-            offset += line.len() + 1;
-            let preceding = ranges.partition_point(|range| range.start < start);
-            if i == 0 || (preceding > 0 && start < ranges[preceding - 1].end) {
-                return line.to_string();
-            }
-            if line.trim().is_empty() {
-                return String::new();
-            }
-            let spaces = line.bytes().take_while(|b| *b == b' ').count();
-            let relative = spaces.saturating_sub(from);
-            let translated = (relative / 4) * tab_spaces + relative % 4;
-            format!("{}{}", " ".repeat(to + translated), &line[spaces..])
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = Vec::new();
+    for (i, line) in body.split('\n').enumerate() {
+        let start = offset;
+        debug_assert!(start <= body.len());
+        offset = start + line.len();
+        if offset < body.len() {
+            offset += 1;
+        }
+        debug_assert!(offset <= body.len());
+        let preceding = ranges.partition_point(|range| range.start < start);
+        if i == 0 || (preceding > 0 && start < ranges[preceding - 1].end) {
+            output.push(line.to_string());
+            continue;
+        }
+        if line.trim().is_empty() {
+            output.push(String::new());
+            continue;
+        }
+        let spaces = line.bytes().take_while(|b| *b == b' ').count();
+        let relative = spaces.saturating_sub(from);
+        let translated = (relative / 4)
+            .checked_mul(tab_spaces)
+            .and_then(|width| width.checked_add(relative % 4))
+            .ok_or_else(|| FmtError::Internal("reindented expression width overflowed".into()))?;
+        let indent = to
+            .checked_add(translated)
+            .ok_or_else(|| FmtError::Internal("reindented expression width overflowed".into()))?;
+        output.push(format!("{}{}", indent_padding(indent)?, &line[spaces..]));
+    }
+    Ok(output.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        checked_contained_range, checked_inner_range, checked_range, function_expression, reindent,
+        wrapper_function,
+    };
+    use crate::error::FmtError;
+
+    fn is_internal_error<T>(result: Result<T, FmtError>) -> bool {
+        matches!(result, Err(FmtError::Internal(_)))
+    }
+
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)] // Deliberately exercise invalid span recovery.
+    fn checked_range_rejects_invalid_boundaries_and_extents() {
+        let source = "é";
+        assert!(is_internal_error(checked_range(source, 1..2, "test")));
+        assert!(is_internal_error(checked_range(source, 2..1, "test")));
+        assert!(is_internal_error(checked_range(source, 0..3, "test")));
+    }
+
+    #[test]
+    fn checked_ranges_reject_unexpected_delimiters_and_containment() {
+        assert!(is_internal_error(checked_inner_range(
+            "[x]",
+            0..3,
+            0..1,
+            2..3,
+            "test"
+        )));
+        assert!(is_internal_error(checked_contained_range(
+            "(x)",
+            1..2,
+            0..3,
+            0..1,
+            2..3,
+            "test"
+        )));
+        assert!(is_internal_error(checked_contained_range(
+            "{x}",
+            0..1,
+            0..3,
+            0..1,
+            2..3,
+            "test"
+        )));
+    }
+
+    #[test]
+    fn wrapper_helpers_reject_unexpected_syntax() {
+        let file = syn::parse_file("fn __sycamorefmt_expr__() {} fn extra() {}").unwrap();
+        assert!(is_internal_error(wrapper_function(
+            &file,
+            "__sycamorefmt_expr__"
+        )));
+
+        let function = syn::parse_str::<syn::ItemFn>("fn f() { let x = 1; }").unwrap();
+        assert!(is_internal_error(function_expression(&function)));
+    }
+
+    #[test]
+    fn reindent_reports_width_overflow() {
+        assert!(is_internal_error(reindent(
+            "{\n        value\n}",
+            0,
+            0,
+            usize::MAX
+        )));
+        assert!(is_internal_error(reindent(
+            "{\n value\n}",
+            0,
+            usize::MAX,
+            4
+        )));
+        assert_eq!(reindent("{\n    value\n}", 4, 0, 0).unwrap(), "{\nvalue\n}");
+    }
 }
