@@ -7,6 +7,7 @@
 //! a sibling gap contained an empty line.
 
 use sycamore_view_parser::ir::{IfNode, MatchNode, Node, Root, TagNode};
+use syn::parse::Parser;
 
 use crate::lex::{block_comment_end, literal_end};
 
@@ -218,6 +219,17 @@ fn scan_if(
         if close >= limit {
             continue;
         }
+        // A block in the condition can look exactly like the then-branch.
+        // Require the entire condition from the IR, not merely a valid prefix,
+        // before accepting this brace as the branch boundary.
+        let Ok(condition) =
+            syn::Expr::parse_without_eager_brace.parse_str(&source[start + 2..open])
+        else {
+            continue;
+        };
+        if condition != if_node.cond {
+            continue;
+        }
         let Some((then_end, then_spacing)) =
             scan_root(&if_node.then, source, delimiters, open + 1, close)
         else {
@@ -253,9 +265,7 @@ fn scan_if(
                 continue;
             }
         } else {
-            // A brace after an expression block in the condition is the
-            // actual then-block, not the end of an `if` without an else.
-            if source.as_bytes().get(after_then) == Some(&b'{') {
+            if if_node.else_branch.is_some() {
                 continue;
             }
             (close + 1, None, false)

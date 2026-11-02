@@ -229,6 +229,43 @@ fn f(show: bool, ready: bool, choice: Option<i32>) -> View {
 }
 
 #[test]
+fn block_conditions_use_the_complete_condition_to_find_branches() {
+    let cases = [
+        r#"if { "x" } == "x" { "yes" } else { "no" }"#,
+        // Without an else, accepting the condition block can silently shift
+        // trivia onto the following sibling instead of producing a warning.
+        r#"if { "x" } == "x" { "yes" }"#,
+        // A valid condition prefix is not necessarily the complete condition.
+        r#"if true && { "x" } == "x" { "yes" } else { "no" }"#,
+        r#"if { "x" } == { "x" } { "yes" } else { "no" }"#,
+        r#"if { "x" } == "x" {} else { "no" }"#,
+        r#"if { true } { "yes" } else { "no" }"#,
+        r#"if show { "shown" } else if { "x" } == "x" { "yes" } else { "no" }"#,
+        r#"if if ready { true } else { false } { "yes" } else { "no" }"#,
+    ];
+    let cfg = Config::default();
+    for conditional in cases {
+        let input = format!("fn f() {{ view! {{ {conditional}\n\nspan {{ \"sibling\" }} }} }}\n");
+        let first = format_source(&input, &cfg).expect("block condition should format");
+        assert!(
+            first.warnings.is_empty(),
+            "{conditional}: {:?}",
+            first.warnings
+        );
+        assert!(first.changed, "{conditional}: view was left unchanged");
+        assert!(
+            first.output.contains("}\n\n    span { \"sibling\" }"),
+            "{conditional}: sibling spacing was lost: {}",
+            first.output
+        );
+        assert_view_macros_parse(&first.output, 0);
+        let second = format_source(&first.output, &cfg).unwrap();
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+        assert_eq!(second.output, first.output, "{conditional}");
+    }
+}
+
+#[test]
 fn robustness_cases_format_without_error_and_are_idempotent() {
     let cfg = Config::default();
 
